@@ -300,6 +300,9 @@ customLightPresetsFile = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep 
 # Shipped template used to seed customLightPresetsFile on first run. The live file is
 # user state and is not tracked in the repository, so the defaults live here instead.
 defaultLightPresetsFile = customLightPresetsFile + ".default"
+# Records that seeding already happened, so a later deliberate reset or delete is not
+# undone by copying the shipped presets back in.
+presetsSeededMarkerFile = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep + "light_prefs" + os.sep + ".presets_seeded"
 geometryPrefsFile = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep + "light_prefs" + os.sep + "NeewerLux.geometry"
 logFilePath = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep + "light_prefs" + os.sep + "NeewerLux.log"
 
@@ -3899,11 +3902,11 @@ def stringToCustomPreset(presetString, numOfPreset):
     else: # if it isn't, then just return the default parameters for this preset
         return getDefaultPreset(numOfPreset)
 
-def loadCustomPresets():
+def loadCustomPresets(presetsFilePath):
     global customLightPresets, numOfPresets, defaultLightPresets, presetNames
 
     # READ THE PREFERENCES FILE INTO A LIST
-    with open(customLightPresetsFile, mode="r", encoding="utf-8") as fileToOpen:
+    with open(presetsFilePath, mode="r", encoding="utf-8") as fileToOpen:
         customPresets = fileToOpen.read().split("\n")
 
     # First pass: check for numOfPresets line and preset names
@@ -6799,25 +6802,44 @@ def createLightPrefsFolder():
     except FileExistsError:
         pass # the folder already exists, so we don't need to create it
 
-def seedCustomPresetsFile():
-    """Copy the shipped preset defaults into place on first run.
+def resolveCustomPresetsFile():
+    """Decide which preset file to load, seeding the user copy on a genuine first run.
 
-    customLights.prefs is user state, so it is not tracked in the repository. The
-    factory preset names and values ship as customLights.prefs.default instead and
-    are copied across once, when no user file exists yet. Never overwrites.
+    customLights.prefs is user state and is not tracked in the repository, so the
+    shipped preset names and values live in customLights.prefs.default instead.
+
+    Returns the path to load presets from, or None to use the built-in factory
+    presets. Absence of the user file is deliberately not enough on its own to mean
+    "first run": both the quick-save and the exit handler delete that file when every
+    preset is back at its factory value, so treating absence as a first run would
+    undo a reset by copying the shipped presets back in. The marker file records
+    that seeding has happened once, and after that an absent file is left absent.
     """
     if os.path.exists(customLightPresetsFile):
-        return # the user already has their own presets, leave them alone
+        return customLightPresetsFile
+
+    if os.path.exists(presetsSeededMarkerFile):
+        return None # seeded before and since removed on purpose, so use the factory presets
 
     if not os.path.exists(defaultLightPresetsFile):
-        return # no template shipped, fall back to the built-in factory presets
+        return None # nothing shipped to seed from
 
     try:
         createLightPrefsFolder()
         shutil.copyfile(defaultLightPresetsFile, customLightPresetsFile)
+
+        with open(presetsSeededMarkerFile, mode="w", encoding="utf-8") as markerFile:
+            markerFile.write("customLights.prefs was seeded from customLights.prefs.default.\n"
+                             "Delete this file to have the shipped presets restored on the next launch.\n")
+
         printDebugString("Seeded customLights.prefs from the shipped defaults.")
+        return customLightPresetsFile
     except OSError as e:
-        printDebugString("Could not seed customLights.prefs from defaults: " + str(e))
+        # Most likely a read-only install directory. The template is still readable,
+        # so load the shipped presets straight out of it rather than dropping to the
+        # unnamed built-ins, which have different values.
+        printDebugString("Could not seed customLights.prefs (" + str(e) + "), loading the shipped defaults read-only.")
+        return defaultLightPresetsFile
 
 def loadPrefsFile(globalPrefsFile = ""):
     global findLightsOnStartup, autoConnectToLights, printDebug, maxNumOfAttempts, \
@@ -6976,10 +6998,10 @@ if __name__ == '__main__':
     else:
         loadPrefsFile() # if it doesn't, then just load the defaults
 
-    seedCustomPresetsFile() # copy the shipped preset defaults into place if this is a first run
+    customPresetsSource = resolveCustomPresetsFile() # seeds the user copy on a genuine first run
 
-    if os.path.exists(customLightPresetsFile):
-        loadCustomPresets() # if there's a custom mapping for presets, then load that into memory
+    if customPresetsSource is not None:
+        loadCustomPresets(customPresetsSource) # if there's a custom mapping for presets, then load that into memory
 
     setUpAsyncio() # set up the asyncio loop
     cmdReturn = [True] # initially set to show the GUI interface over the CLI interface
