@@ -6802,6 +6802,24 @@ def createLightPrefsFolder():
     except FileExistsError:
         pass # the folder already exists, so we don't need to create it
 
+def markPresetsAsSeeded():
+    """Record that this install already has its presets, so they are never re-seeded.
+
+    Best effort. A read-only install directory cannot be marked, but it cannot save
+    presets either, so there is no reset for the marker to protect.
+    """
+    if os.path.exists(presetsSeededMarkerFile):
+        return
+
+    try:
+        createLightPrefsFolder()
+
+        with open(presetsSeededMarkerFile, mode="w", encoding="utf-8") as markerFile:
+            markerFile.write("customLights.prefs has been set up for this install.\n"
+                             "Delete this file to have the shipped presets restored on the next launch.\n")
+    except OSError as e:
+        printDebugString("Could not write the preset seeding marker: " + str(e))
+
 def resolveCustomPresetsFile():
     """Decide which preset file to load, seeding the user copy on a genuine first run.
 
@@ -6816,6 +6834,10 @@ def resolveCustomPresetsFile():
     that seeding has happened once, and after that an absent file is left absent.
     """
     if os.path.exists(customLightPresetsFile):
+        # An upgrade over an existing install. Record that this user already has their
+        # presets, so that a later reset (which deletes the file) is not mistaken for a
+        # first run and answered by copying the shipped presets back in.
+        markPresetsAsSeeded()
         return customLightPresetsFile
 
     if os.path.exists(presetsSeededMarkerFile):
@@ -6827,11 +6849,7 @@ def resolveCustomPresetsFile():
     try:
         createLightPrefsFolder()
         shutil.copyfile(defaultLightPresetsFile, customLightPresetsFile)
-
-        with open(presetsSeededMarkerFile, mode="w", encoding="utf-8") as markerFile:
-            markerFile.write("customLights.prefs was seeded from customLights.prefs.default.\n"
-                             "Delete this file to have the shipped presets restored on the next launch.\n")
-
+        markPresetsAsSeeded()
         printDebugString("Seeded customLights.prefs from the shipped defaults.")
         return customLightPresetsFile
     except OSError as e:
