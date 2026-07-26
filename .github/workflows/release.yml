@@ -27,13 +27,15 @@ jobs:
           python-version: '3.13'
           enable-cache: true
 
-      # --frozen fails the build if uv.lock is out of date with pyproject.toml,
-      # so a release can never be built against an unlocked dependency set.
+      # --locked asserts uv.lock is already in agreement with pyproject.toml and
+      # fails the build otherwise, so a release can never be cut from a stale or
+      # uncommitted dependency resolution. (--frozen would only skip updating the
+      # lock, which silently installs stale contents instead of failing.)
       - name: Install dependencies
-        run: uv sync --frozen --group build
+        run: uv sync --locked --group build
 
       - name: Build EXE with PyInstaller
-        run: uv run pyinstaller NeewerLux.spec
+        run: uv run --locked --group build pyinstaller NeewerLux.spec
 
       - name: Copy light_prefs into dist
         run: |
