@@ -175,6 +175,32 @@ would not help: a browser sends a cross-origin GET regardless and only blocks th
 page from reading the reply, by which point the lights have already changed. Requests with
 no browser headers at all (curl, scripts, the address bar) are unaffected.
 
+### JSON Responses
+
+Any GET request answers with JSON instead of an HTML page when you ask for it:
+
+```
+curl -H "Accept: application/json" \
+  "http://localhost:8080/NeewerLux/doAction?light=1&mode=CCT&temp=56&bri=50"
+```
+```json
+{"success": true, "mode": "CCT", "target": "1", "params": {"temp": 56, "bri": 50},
+ "request": "/NeewerLux/doAction?light=1&mode=CCT&temp=56&bri=50"}
+```
+
+Errors use the same shape and carry a real status code, so a script does not have to
+scrape markup to find out what went wrong:
+
+```json
+{"success": false, "code": 403, "error": "The IP of the device you're making the request from ..."}
+```
+
+A successful response means the command was accepted and understood, not that the lights
+have finished acting on it. BLE writes happen on a background thread.
+
+The legacy `nopage` parameter and the `?list_json` endpoint still work and are treated as
+requests for JSON.
+
 ### HTTP Animation API
 
 **GET:** `http://server:port/NeewerLux/doAction?animate=Concert%20Sweep|2.0|10|50`
