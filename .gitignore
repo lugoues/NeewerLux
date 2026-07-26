@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build output
+build/
+dist/
+*.spec.bak
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# mise local overrides. This file holds machine-local env, including tokens,
+# and must never be committed.
+.mise/config.local.toml
+
+# Visual Studio / VS Code local state
+.vs/
+.vscode/
+
+# OS noise
+.DS_Store
+Thumbs.db
+*~
