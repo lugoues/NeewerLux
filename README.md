@@ -26,14 +26,22 @@ install from the lockfile reproduces exactly what the release builds against.
 
 Using [uv](https://docs.astral.sh/uv/) (recommended):
 ```
-uv sync --frozen
+uv sync --locked
 uv run NeewerLux.py
 ```
 
-Using pip:
+Using pip. The version bounds match `pyproject.toml`, so this will not silently pull
+in a future PySide 7 or Bleak 4 that the app has not been tested against:
 ```
-pip install PySide6 bleak
+pip install "PySide6>=6.7,<7" "bleak>=0.22,<4"
 python NeewerLux.py
+```
+
+**Headless installs** (`--cli`, `--list`, `--http`) do not need Qt at all. To skip the
+GUI toolkit entirely:
+```
+uv sync --locked --no-default-groups
+uv run NeewerLux.py --http
 ```
 
 ---

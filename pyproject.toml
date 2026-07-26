@@ -16,8 +16,12 @@ classifiers = [
     "Topic :: Multimedia :: Video",
 ]
 
+# Only bleak is unconditional. The GUI toolkit is in the "gui" group below, because
+# --cli, --list and --http all run without Qt: the PySide6 import is wrapped in a
+# try/except and those paths never touch it. Keeping it out of the base dependency
+# set means headless installs (Raspberry Pi, containers, CI) do not have to pull in
+# or find a wheel for the whole Qt stack.
 dependencies = [
-    "PySide6>=6.7,<7",
     "bleak>=0.22,<4",
 ]
 
@@ -26,6 +30,8 @@ Homepage = "https://github.com/poizenjam/NeewerLux"
 Changelog = "https://github.com/poizenjam/NeewerLux/blob/main/CHANGELOG.md"
 
 [dependency-groups]
+# The desktop application. Installed by default, see tool.uv.default-groups.
+gui = ["PySide6>=6.7,<7"]
 # Used by the release workflow to build the Windows executable.
 build = ["pyinstaller>=6.10"]
 
@@ -34,3 +40,6 @@ build = ["pyinstaller>=6.10"]
 # This keeps uv from trying to build a wheel for the project itself while
 # still resolving and locking its dependencies.
 package = false
+# "uv sync" gives you the full desktop app. Headless installs opt out with
+# "uv sync --no-default-groups".
+default-groups = ["gui"]
