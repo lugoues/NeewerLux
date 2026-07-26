@@ -20,9 +20,19 @@ Fork of [NeewerLite-Python](https://github.com/taburineagle/NeewerLite-Python) (
 Preset and animation files are in the `light_prefs/` folder alongside the executable and can be edited manually with any text editor.
 
 ### Running from Source
-Requires Python 3.8+:
+
+Requires Python 3.11 or newer. Dependency versions are pinned in `uv.lock`, so an
+install from the lockfile reproduces exactly what the release builds against.
+
+Using [uv](https://docs.astral.sh/uv/) (recommended):
 ```
-pip install -r requirements.txt
+uv sync --frozen
+uv run NeewerLux.py
+```
+
+Using pip:
+```
+pip install PySide6 bleak
 python NeewerLux.py
 ```
 
