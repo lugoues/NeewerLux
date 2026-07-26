@@ -31,6 +31,7 @@ if sys.stderr is None:
 
 import math # used for calculating the RGB values of color temperatures
 import json # used for animation files and HTTP batch/animation APIs
+import shutil # used to seed the default preset file on first run
 import tempfile
 import faulthandler
 import warnings
@@ -296,6 +297,9 @@ lockFile = tempfile.gettempdir() + os.sep + "NeewerLux.lock"
 anotherInstance = False # whether or not we're using a new instance (for the Singleton check)
 globalPrefsFile = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep + "light_prefs" + os.sep + "NeewerLux.prefs" # the global preferences file for saving/loading
 customLightPresetsFile = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep + "light_prefs" + os.sep + "customLights.prefs"
+# Shipped template used to seed customLightPresetsFile on first run. The live file is
+# user state and is not tracked in the repository, so the defaults live here instead.
+defaultLightPresetsFile = customLightPresetsFile + ".default"
 geometryPrefsFile = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep + "light_prefs" + os.sep + "NeewerLux.geometry"
 logFilePath = os.path.dirname(os.path.abspath(sys.argv[0])) + os.sep + "light_prefs" + os.sep + "NeewerLux.log"
 
@@ -6795,6 +6799,26 @@ def createLightPrefsFolder():
     except FileExistsError:
         pass # the folder already exists, so we don't need to create it
 
+def seedCustomPresetsFile():
+    """Copy the shipped preset defaults into place on first run.
+
+    customLights.prefs is user state, so it is not tracked in the repository. The
+    factory preset names and values ship as customLights.prefs.default instead and
+    are copied across once, when no user file exists yet. Never overwrites.
+    """
+    if os.path.exists(customLightPresetsFile):
+        return # the user already has their own presets, leave them alone
+
+    if not os.path.exists(defaultLightPresetsFile):
+        return # no template shipped, fall back to the built-in factory presets
+
+    try:
+        createLightPrefsFolder()
+        shutil.copyfile(defaultLightPresetsFile, customLightPresetsFile)
+        printDebugString("Seeded customLights.prefs from the shipped defaults.")
+    except OSError as e:
+        printDebugString("Could not seed customLights.prefs from defaults: " + str(e))
+
 def loadPrefsFile(globalPrefsFile = ""):
     global findLightsOnStartup, autoConnectToLights, printDebug, maxNumOfAttempts, \
            rememberLightsOnExit, acceptable_HTTP_IPs, customKeys, enableTabsOnLaunch, \
@@ -6951,6 +6975,8 @@ if __name__ == '__main__':
         loadPrefsFile(globalPrefsFile) # if a preferences file exists, process it and load the preferences
     else:
         loadPrefsFile() # if it doesn't, then just load the defaults
+
+    seedCustomPresetsFile() # copy the shipped preset defaults into place if this is a first run
 
     if os.path.exists(customLightPresetsFile):
         loadCustomPresets() # if there's a custom mapping for presets, then load that into memory
