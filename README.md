@@ -41,8 +41,11 @@ python NeewerLux.py
 GUI toolkit entirely:
 ```
 uv sync --locked --no-default-groups
-uv run NeewerLux.py --http
+uv run --no-default-groups NeewerLux.py --http
 ```
+`uv run` re-syncs the environment before running, so `--no-default-groups` is needed on
+both commands. Without it on the second one, uv reinstates the GUI group and pulls
+PySide6 back in.
 
 ---
 
