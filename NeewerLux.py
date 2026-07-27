@@ -5231,9 +5231,6 @@ def processHTMLCommands(paramsList, loop):
     asyncioEventLoop.run_until_complete() directly — that crashes when the worker
     thread is already using the event loop.  Instead, all BLE operations are
     queued via the global threadAction variable, which the worker thread polls.
-
-    Returns "" when the command was dispatched, or a short reason string when it was
-    not, so an HTTP caller can be told the difference between accepted and dropped.
     """
     global threadAction, numOfPresets, defaultLightPresets, customLightPresets
 
@@ -5245,10 +5242,10 @@ def processHTMLCommands(paramsList, loop):
     
     if threadAction not in ("", "HTTP"):
         printDebugString("The HTTP Server requested an action, but the worker thread is busy (" + threadAction + ") after waiting. Skipping.")
-        return "busy"
+        return
 
     if len(paramsList) == 0:
-        return "no parameters"
+        return
 
     # Stop any running animation for non-animation HTTP commands
     if paramsList[3] not in ("animate", "stop_animate", "list_animations") and animationRunning:
@@ -5356,11 +5353,9 @@ def processHTMLCommands(paramsList, loop):
             if revertOverride is not None:
                 global animRevertOnFinish
                 animRevertOnFinish = revertOverride
-            if not startAnimation(animName, loop, speedMult, loopOverride=loopOverride, fps=fps, briScale=briScale, maxLoops=maxLoops):
-                return "animation not found: " + animName
+            startAnimation(animName, loop, speedMult, loopOverride=loopOverride, fps=fps, briScale=briScale, maxLoops=maxLoops)
         else:
             printDebugString("HTTP: no animation name specified")
-            return "no animation name specified"
 
     elif paramsList[3] == "stop_animate":
         stopAnimation()
@@ -5392,7 +5387,7 @@ def processHTMLCommands(paramsList, loop):
             computedValue = [120, 129, 1, 2, 252]
         else:
             printDebugString("HTTP: Unknown mode '" + paramsList[3] + "'")
-            return "unknown mode: " + str(paramsList[3])
+            return
 
         selectedLights = returnLightIndexesFromMacAddress(paramsList[2])
 
@@ -6482,8 +6477,11 @@ class NLPythonServer(BaseHTTPRequestHandler):
         if acceptHeader.strip() == "":
             return False
 
-        jsonQuality = 0.0
-        htmlQuality = 0.0
+        # Precedence, most specific first, per RFC 9110: an exact type beats a subtype
+        # wildcard, which beats */*. Taking the highest q across all matching ranges
+        # would let "application/*;q=1" override an explicit "application/json;q=0",
+        # which says the opposite of what the client asked for.
+        ranges = {}
 
         for mediaRange in acceptHeader.split(","):
             parts = [part.strip() for part in mediaRange.split(";")]
@@ -6497,10 +6495,20 @@ class NLPythonServer(BaseHTTPRequestHandler):
                     except ValueError:
                         quality = 0.0
 
-            if mediaType in ("application/json", "application/*"):
-                jsonQuality = max(jsonQuality, quality)
-            elif mediaType in ("text/html", "text/*"):
-                htmlQuality = max(htmlQuality, quality)
+            ranges[mediaType] = quality
+
+        def qualityFor(candidates):
+            for candidate in candidates:
+                if candidate in ranges:
+                    return ranges[candidate]
+            return 0.0
+
+        # "*/*" counts towards HTML but not towards JSON, so a client expressing no
+        # preference keeps getting the page it used to get. curl sends "*/*" by
+        # default, and flipping that to JSON would change what every existing script
+        # and browser navigation receives. JSON has to be asked for by name.
+        jsonQuality = qualityFor(("application/json", "application/*"))
+        htmlQuality = qualityFor(("text/html", "text/*", "*/*"))
 
         return jsonQuality > 0 and jsonQuality >= htmlQuality
 
@@ -6516,10 +6524,20 @@ class NLPythonServer(BaseHTTPRequestHandler):
         if self._acceptsJSONHeader():
             return True
 
-        if "_json" in self.path:
+        # BaseHTTPRequestHandler calls send_error for a malformed request line before
+        # it ever assigns self.path, so this cannot assume the attribute exists.
+        requestPath = getattr(self, "path", "")
+
+        if "_json" in requestPath:
             return True
 
-        return "nopage" in self.path
+        # Match nopage as a parameter key, not as a substring. processCommands
+        # lowercases parameters, so "NOPAGE" means the same thing to it, and a light
+        # named "nopage-rig" in some other parameter's value does not.
+        queryKeys = [parameter.split("=")[0].strip().lower()
+                     for parameter in requestPath.partition("?")[2].split("&")]
+
+        return "nopage" in queryKeys
 
     def _sendJSON(self, payload, status=200):
         """Write a JSON response body with the right headers."""
@@ -6532,15 +6550,6 @@ class NLPythonServer(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(responseBody)
-
-    def _isListMode(self, queryPart):
-        """Whether "list" appears as a parameter, wherever it sits in the query.
-
-        ?list and ?nopage&list mean the same thing to the parser, so they must mean
-        the same thing here. Matching only on the start of the query made the answer
-        depend on parameter order.
-        """
-        return "list" in [parameter.split("=")[0].strip().lower() for parameter in queryPart.split("&")]
 
     def _sendDoActionJSON(self, paramsList):
         """The JSON form of a doAction response.
@@ -6567,33 +6576,38 @@ class NLPythonServer(BaseHTTPRequestHandler):
             result["params"] = {"hue": paramsList[4], "sat": paramsList[5], "bri": paramsList[6]}
         elif requestedMode in ("ANM", "SCENE") and len(paramsList) > 5:
             result["params"] = {"scene": paramsList[4], "bri": paramsList[5]}
+        elif requestedMode == "list":
+            result["lights"] = [{"id": index + 1,
+                                 "name": light[2] if light[2] else light[0].name,
+                                 "mac": light[0].address,
+                                 "linked": bool(light[1] != "" and hasattr(light[1], "is_connected") and light[1].is_connected)}
+                                for index, light in enumerate(availableLights)]
         elif requestedMode == "list_animations":
             result["animations"] = [{"name": animName,
                                      "description": animData.get("description", ""),
                                      "frames": len(animData.get("keyframes", [])),
                                      "loop": animData.get("loop", False)}
                                     for animName, animData in sorted(savedAnimations.items())]
-
-        # Dispatch inline rather than on a detached thread, so the outcome can be
-        # reported. The HTML path fires and forgets, which is why it can claim success
-        # for an animation that does not exist. ThreadingHTTPServer already gives this
-        # request its own thread, so nothing is being blocked that was not before.
-        dispatchFailure = ""
-
-        if requestedMode != "list":
-            dispatchFailure = processHTMLCommands(paramsList, asyncioEventLoop) or ""
-
-        if dispatchFailure != "":
-            self.send_error(409 if dispatchFailure == "busy" else 400, "The command was not carried out: " + dispatchFailure)
-            return
+            # Only reported for the listing, which reads current state. On animate and
+            # stop_animate it would be a guess: startAnimation returns as soon as the
+            # engine thread is started, and animationRunning is not assigned until that
+            # thread runs, so the value read here would depend on scheduling.
+            result["animationPlaying"] = animationRunning
+            result["currentAnimation"] = currentAnimationName if animationRunning else None
 
         result["success"] = True
 
-        # Read after dispatching, otherwise starting an animation reports the previous
-        # "not playing" and stopping one reports that it is still going.
-        if requestedMode in ("animate", "stop_animate", "list_animations"):
-            result["animationPlaying"] = animationRunning
-            result["currentAnimation"] = currentAnimationName if animationRunning else None
+        # list and list_animations are answered entirely from state already in memory,
+        # so they must not go near the worker: processHTMLCommands waits up to five
+        # seconds for it before reaching its own no-op branch for these.
+        if requestedMode not in ("list", "list_animations"):
+            # Same fire-and-forget dispatch the HTML path uses. "success" here means the
+            # request was understood and queued, not that the lights have acted on it,
+            # and not that the command will turn out to be executable. Reporting the
+            # real outcome needs the request path restructured so the dispatch can be
+            # awaited, which belongs with the module split rather than here.
+            htmlProcessThread = threading.Thread(target=processHTMLCommands, args=(paramsList, asyncioEventLoop), name="htmlProcessThread")
+            htmlProcessThread.start()
 
         self._sendJSON(result)
 
@@ -6709,7 +6723,7 @@ class NLPythonServer(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-                if queryPart.startswith("list_json") or (isListRequest and wantsJSON) or (wantsJSON and self._isListMode(queryPart)):
+                if queryPart.startswith("list_json") or (isListRequest and wantsJSON):
                     # Return structured JSON for the web dashboard
                     self.send_response(200)
                     self._send_cors_headers()

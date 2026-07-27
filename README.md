@@ -195,10 +195,14 @@ scrape markup to find out what went wrong:
 {"success": false, "code": 403, "error": "The IP of the device you're making the request from ..."}
 ```
 
-A successful response means the command was dispatched, not that every light has finished
-acting on it. The BLE write itself is queued for the worker thread. Commands that could
-not be dispatched at all report it rather than claiming success: an unknown animation
-answers `400`, and a worker still busy with an earlier command answers `409`.
+A successful response means the request was understood and queued, not that the lights
+have acted on it, and not that the command will turn out to be executable. Asking for an
+animation that does not exist is still answered as a success, the same as it is on the
+HTML path. Reporting the real outcome needs the request path restructured so the dispatch
+can be awaited.
+
+JSON is chosen only when the client names it. `Accept: */*`, which is what curl sends by
+default, still gets the HTML page.
 
 The legacy `nopage` parameter and the `?list_json` endpoint still work and are treated as
 requests for JSON.
