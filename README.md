@@ -169,6 +169,12 @@ somewhere else, such as a browser-based stream deck. The bundled dashboard is se
 this same server and does not need it. Setting it to `*` allows any website you visit to
 control your lights, so use a specific origin instead.
 
+Requests that arrive from a web page not on that list are **refused before the command
+runs**, rather than merely being answered without CORS headers. Response headers alone
+would not help: a browser sends a cross-origin GET regardless and only blocks the calling
+page from reading the reply, by which point the lights have already changed. Requests with
+no browser headers at all (curl, scripts, the address bar) are unaffected.
+
 ### HTTP Animation API
 
 **GET:** `http://server:port/NeewerLux/doAction?animate=Concert%20Sweep|2.0|10|50`
