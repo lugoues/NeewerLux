@@ -31,6 +31,7 @@ if sys.stderr is None:
 
 import math # used for calculating the RGB values of color temperatures
 import json # used for animation files and HTTP batch/animation APIs
+import ipaddress # used to match HTTP clients against the allowed address ranges
 import shutil # used to seed the default preset file on first run
 import tempfile
 import faulthandler
@@ -156,7 +157,23 @@ def showConsoleWindow():
 # IMPORT THE HTTP SERVER
 try:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import socket # to pick the right address family when binding an IPv6 address
     import urllib.parse # parsing custom light names in the HTTP server
+
+    class NeewerLuxHTTPServer(ThreadingHTTPServer):
+        """ThreadingHTTPServer that can also bind an IPv6 address.
+
+        The base class is hardcoded to AF_INET, so handing it "::1" or "::" raises
+        socket.gaierror before the server ever starts listening.
+        """
+        def __init__(self, server_address, RequestHandlerClass):
+            try:
+                if ipaddress.ip_address(server_address[0]).version == 6:
+                    self.address_family = socket.AF_INET6
+            except ValueError:
+                pass # a hostname rather than a literal address, leave the default alone
+
+            ThreadingHTTPServer.__init__(self, server_address, RequestHandlerClass)
 except Exception as e:
     pass # if there are any HTTP errors, don't do anything yet
 
@@ -282,6 +299,8 @@ hideConsoleOnLaunch = False # whether to auto-hide the console window on GUI sta
 minimizeToTrayOnClose = True # whether closing the window minimizes to tray (True) or quits (False)
 httpAutoStart = False # whether to automatically start the HTTP server on launch
 httpPort = 8080 # port the HTTP server listens on
+httpBindAddress = "127.0.0.1" # interface the HTTP server listens on, loopback unless opted out of
+httpAllowedOrigins = [] # browser origins allowed to make cross-origin calls, empty disables CORS entirely
 cctFallbackMode = "convert" # how to handle HSI/ANM commands sent to CCT-only lights: "ignore" or "convert"
 enableLogTab = True # whether to show and populate the Log tab
 logToFile = False # whether to also write log entries to a file
@@ -289,6 +308,95 @@ globalCCTMin = 3200 # global default minimum color temperature (K)
 globalCCTMax = 5600 # global default maximum color temperature (K)
 autoReconnectOnDisconnect = True # whether or not to automatically try reconnecting to lights that disconnect (e.g. after sleep/wake)
 acceptable_HTTP_IPs = [] # the acceptable IPs for the HTTP server, set on launch by prefs file
+# Loopback only, matching the default bind address. Defined once so the prefs parser,
+# the save path and the "reset to defaults" button cannot drift apart.
+defaultAcceptableIPs = ["127.0.0.1", "::1"]
+_ipAllowlistCache = (None, []) # (source tuple, parsed networks), rebuilt when the source list changes
+
+def parseIPAllowlist(entries):
+    """Turn HTTP allowlist entries into ipaddress network objects.
+
+    Accepts three spellings so existing preference files keep working:
+      - CIDR, "192.168.1.0/24"
+      - a single address, "127.0.0.1" or "::1"
+      - the legacy dotted prefix, "192.168." or "10."
+
+    The legacy prefixes existed because this list used to be matched with a
+    substring test, which accepted far more than intended: "10." also matched
+    110.23.4.5 and 210.0.0.1. Each prefix is widened here to the CIDR block it
+    was always meant to describe, one octet being eight bits of prefix.
+    """
+    networks = []
+
+    for rawEntry in entries:
+        entry = rawEntry.strip()
+
+        if entry == "":
+            continue
+
+        try:
+            if entry.endswith(".") and "/" not in entry:
+                # Exactly one trailing dot, and no empty component anywhere else. A
+                # typo like ".10." or "192..168." would otherwise be quietly accepted
+                # as 10.0.0.0/8 or 192.168.0.0/16, authorising a network far larger
+                # than whatever was meant.
+                octets = entry[:-1].split(".")
+
+                if not 1 <= len(octets) <= 4 or any(octet == "" for octet in octets):
+                    raise ValueError("a dotted prefix must be one to four octets followed by a single dot")
+
+                paddedEntry = ".".join(octets + ["0"] * (4 - len(octets)))
+                networks.append(ipaddress.ip_network(paddedEntry + "/" + str(len(octets) * 8), strict=False))
+            else:
+                networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError as e:
+            printDebugString("Ignoring unparseable HTTP allowlist entry " + repr(entry) + ": " + str(e))
+
+    return networks
+
+def getAcceptedNetworks():
+    """Parsed form of acceptable_HTTP_IPs, reparsed only when that list changes."""
+    global _ipAllowlistCache
+
+    currentKey = tuple(acceptable_HTTP_IPs)
+
+    if _ipAllowlistCache[0] != currentKey:
+        _ipAllowlistCache = (currentKey, parseIPAllowlist(acceptable_HTTP_IPs))
+
+    return _ipAllowlistCache[1]
+
+def isAcceptedClientIP(clientIP):
+    """Whether a client address falls inside one of the allowed networks."""
+    try:
+        address = ipaddress.ip_address(clientIP)
+    except ValueError:
+        return False # not an address we can reason about, so refuse it
+
+    # A dual-stack listener reports IPv4 clients as ::ffff:127.0.0.1, which would
+    # never match an IPv4 rule. Unwrap those back to the address the rule expects.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+
+    for network in getAcceptedNetworks():
+        if address.version == network.version and address in network:
+            return True
+
+    return False
+
+def logHTTPServerExposure():
+    """State plainly who can reach the server, since this decides who can drive the lights."""
+    networks = ", ".join(str(network) for network in getAcceptedNetworks()) or "(none, every request will be refused)"
+
+    if httpBindAddress in ("", "0.0.0.0", "::"):
+        printDebugString("HTTP server is reachable from the network on " + httpBindAddress + ":" + str(httpPort))
+        printDebugString("  Requests are accepted from: " + networks)
+    else:
+        printDebugString("HTTP server is bound to " + httpBindAddress + ":" + str(httpPort) + " and is not reachable from other machines.")
+        printDebugString("  Requests are accepted from: " + networks)
+
+    if len(httpAllowedOrigins) > 0:
+        printDebugString("  Cross-origin browser calls allowed from: " + ", ".join(httpAllowedOrigins))
+
 customKeys = [] # custom keymappings for keyboard shortcuts, set on launch by the prefs file
 whiteListedMACs = [] # whitelisted list of MAC addresses to add to NeewerLux
 enableTabsOnLaunch = False # whether or not to enable tabs on startup (even with no lights connected)
@@ -2179,6 +2287,8 @@ try: # try to load the GUI
                     printDebugString("You don't have any new preferences to save, so we aren't saving any!")
 
         def setupGlobalLightPrefsTab(self, setDefault=False):
+            global httpAllowedOrigins, httpBindAddress # cleared by the reset path below
+
             if setDefault == False:
                 self.findLightsOnStartup_check.setChecked(findLightsOnStartup)
                 self.autoConnectToLights_check.setChecked(autoConnectToLights)
@@ -2194,6 +2304,7 @@ try: # try to load the GUI
                 self.minimizeToTrayOnClose_check.setChecked(minimizeToTrayOnClose)
                 self.httpAutoStart_check.setChecked(httpAutoStart)
                 self.httpPortField.setText(str(httpPort))
+                self.httpBindCombo.setCurrentIndex(1 if httpBindAddress in ("0.0.0.0", "::") else 0)
                 self.cctFallbackCombo.setCurrentIndex(0 if cctFallbackMode == "convert" else 1)
                 self.enableLogTab_check.setChecked(enableLogTab)
                 self.logToFile_check.setChecked(logToFile)
@@ -2238,13 +2349,19 @@ try: # try to load the GUI
                 self.minimizeToTrayOnClose_check.setChecked(True)
                 self.httpAutoStart_check.setChecked(False)
                 self.httpPortField.setText("8080")
+                self.httpBindCombo.setCurrentIndex(0)  # This computer only
+                # No field represents this, so without clearing it here "Reset
+                # Preferences to Defaults" would leave the server cross-origin
+                # accessible with no way to turn it off from the interface.
+                httpAllowedOrigins = []
+                httpBindAddress = "127.0.0.1"
                 self.cctFallbackCombo.setCurrentIndex(0)  # Convert
                 self.enableLogTab_check.setChecked(True)
                 self.logToFile_check.setChecked(False)
                 self.globalCCTMinSpin.setValue(3200)
                 self.globalCCTMaxSpin.setValue(5600)
                 self.maxNumOfAttempts_field.setText("6")
-                self.acceptable_HTTP_IPs_field.setText("\n".join(["127.0.0.1", "192.168.", "10."]))
+                self.acceptable_HTTP_IPs_field.setText("\n".join(defaultAcceptableIPs))
                 self.whiteListedMACs_field.setText("")
                 self.SC_turnOffButton_field.setKeySequence("Ctrl+PgDown")
                 self.SC_turnOnButton_field.setKeySequence("Ctrl+PgUp")
@@ -2273,7 +2390,10 @@ try: # try to load the GUI
 
         def saveGlobalPrefs(self):
             # change these global values to the new values in Prefs
-            global customKeys, autoConnectToLights, printDebug, rememberLightsOnExit, rememberPresetsOnExit, autoReconnectOnDisconnect, maxNumOfAttempts, acceptable_HTTP_IPs, whiteListedMACs, hideConsoleOnLaunch, minimizeToTrayOnClose, httpAutoStart, httpPort, cctFallbackMode, enableLogTab, logToFile, globalCCTMin, globalCCTMax, globalCCTMin, globalCCTMax, enableLogTab, logToFile, globalCCTMin, globalCCTMax, cctFallbackMode
+            global customKeys, autoConnectToLights, printDebug, rememberLightsOnExit, rememberPresetsOnExit, \
+                   autoReconnectOnDisconnect, maxNumOfAttempts, acceptable_HTTP_IPs, whiteListedMACs, \
+                   hideConsoleOnLaunch, minimizeToTrayOnClose, httpAutoStart, httpPort, httpBindAddress, \
+                   httpAllowedOrigins, cctFallbackMode, enableLogTab, logToFile, globalCCTMin, globalCCTMax
 
             finalPrefs = [] # list of final prefs to merge together at the end
 
@@ -2358,6 +2478,19 @@ try: # try to load the GUI
             if httpPort != 8080: # only save non-default
                 finalPrefs.append("httpPort=" + str(httpPort))
 
+            # The combo has two entries but four values are valid, so a configured "::1"
+            # or "::" must not be flattened to its IPv4 spelling just because the user
+            # saved some unrelated setting. Only rewrite the address if the selection
+            # actually disagrees with what is loaded.
+            wantsAllInterfaces = (self.httpBindCombo.currentIndex() == 1)
+            hasAllInterfaces = httpBindAddress in ("0.0.0.0", "::")
+
+            if wantsAllInterfaces != hasAllInterfaces:
+                httpBindAddress = "0.0.0.0" if wantsAllInterfaces else "127.0.0.1"
+
+            if httpBindAddress != "127.0.0.1": # only save non-default
+                finalPrefs.append("httpBindAddress=" + httpBindAddress)
+
             cctFallbackMode = "convert" if self.cctFallbackCombo.currentIndex() == 0 else "ignore"
             if cctFallbackMode != "convert":  # only save non-default
                 finalPrefs.append("cctFallbackMode=" + cctFallbackMode)
@@ -2398,11 +2531,22 @@ try: # try to load the GUI
             # FIGURE OUT IF THE HTTP IP ADDRESSES HAVE CHANGED
             returnedList_HTTP_IPs = self.acceptable_HTTP_IPs_field.toPlainText().split("\n")
             
-            if returnedList_HTTP_IPs != ["127.0.0.1", "192.168.", "10."]: # if the list of HTTP IPs have changed
+            returnedList_HTTP_IPs = [entry for entry in returnedList_HTTP_IPs if entry.strip() != ""]
+
+            if returnedList_HTTP_IPs != defaultAcceptableIPs: # if the list of HTTP IPs have changed
                 acceptable_HTTP_IPs = returnedList_HTTP_IPs # change the global HTTP IPs available
-                finalPrefs.append("acceptable_HTTP_IPs=" + ";".join(acceptable_HTTP_IPs)) # add the new ones to the preferences
+                # Must be "acceptableIPs": that is the key the loader accepts and the
+                # argument the parser defines. Saving it as acceptable_HTTP_IPs meant the
+                # line was silently dropped on the next launch and the default restored.
+                finalPrefs.append("acceptableIPs=" + ";".join(acceptable_HTTP_IPs)) # add the new ones to the preferences
             else:
-                acceptable_HTTP_IPs = ["127.0.0.1", "192.168.", "10."] # if we reset the IPs, then re-reset the parameter
+                acceptable_HTTP_IPs = list(defaultAcceptableIPs) # if we reset the IPs, then re-reset the parameter
+
+            # httpAllowedOrigins has no field in this dialog, but saving rebuilds the whole
+            # preferences file, so a hand-configured value has to be written back out or it
+            # would disappear the next time any other setting was saved.
+            if len(httpAllowedOrigins) > 0:
+                finalPrefs.append("httpAllowedOrigins=" + ";".join(httpAllowedOrigins))
 
             # ADD WHITELISTED LIGHTS TO PREFERENCES IF THEY EXIST
             returnedList_whiteListedMACs = self.whiteListedMACs_field.toPlainText().replace(" ", "").split("\n") # remove spaces and split on newlines
@@ -3061,10 +3205,11 @@ try: # try to load the GUI
             else:
                 # Start the server
                 try:
-                    httpServerInstance = ThreadingHTTPServer(("", httpPort), NLPythonServer)
+                    httpServerInstance = NeewerLuxHTTPServer((httpBindAddress, httpPort), NLPythonServer)
                     httpServerThread = threading.Thread(target=httpServerInstance.serve_forever, name="httpServerThread", daemon=True)
                     httpServerThread.start()
                     httpServerRunning = True
+                    logHTTPServerExposure()
                     self.httpToggleBtn.setText("HTTP: ON")
                     self.httpToggleBtn.setProperty("httpActive", True)
                     self.httpToggleBtn.style().unpolish(self.httpToggleBtn)
@@ -6205,12 +6350,143 @@ def deleteAnimationFile(name):
 
 
 class NLPythonServer(BaseHTTPRequestHandler):
+    def _allowedOrigin(self):
+        """The Origin to echo back, or None if this request gets no CORS headers.
+
+        CORS is off unless httpAllowedOrigins names the origins that may call in.
+        The web dashboard is served from this same server, and same-origin requests
+        never consult CORS, so it keeps working with the list empty.
+        """
+        origin = self.headers.get("Origin", "")
+
+        if origin == "" or len(httpAllowedOrigins) == 0:
+            return None
+
+        if "*" in httpAllowedOrigins:
+            return origin # explicitly opted in to any origin
+
+        return origin if origin in httpAllowedOrigins else None
+
     def _send_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self._allowedOrigin()
+
+        if origin is None:
+            return # no CORS headers at all, which is the default
+
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin") # the response differs per origin, so it must not be cached across them
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+    def _hostIsLocal(self):
+        """Whether the Host header names this server by an address we expect.
+
+        This is the DNS rebinding defence. An attacker can point a name they control
+        at 127.0.0.1, and the browser will then treat http://their-name:8080 as the
+        same origin as this server and say so in Sec-Fetch-Site. The connection really
+        does arrive from loopback, so the address allowlist passes it too. What gives
+        it away is the Host header, which still carries the attacker's name, so any
+        Host that is not a literal local address is refused.
+        """
+        host = self.headers.get("Host", "")
+
+        if host == "":
+            return False
+
+        # Strip the port. A bracketed IPv6 literal keeps its colons.
+        if host.startswith("["):
+            hostName = host[1:host.find("]")] if "]" in host else host
+        else:
+            hostName = host.split(":")[0]
+
+        hostName = hostName.strip().lower()
+
+        if hostName == "localhost":
+            return True
+
+        try:
+            address = ipaddress.ip_address(hostName)
+        except ValueError:
+            return False # a name rather than a literal address, so not trusted
+
+        if address.is_loopback:
+            return True
+
+        # Reaching the server over the LAN means Host is whatever address the client
+        # dialled, which has to be one this server is actually bound to.
+        return httpBindAddress in ("0.0.0.0", "::") or hostName == httpBindAddress
+
+    def _ownOrigin(self):
+        """The origin this request was addressed to, for comparing against Origin."""
+        host = self.headers.get("Host", "")
+        return "http://" + host if host != "" else ""
+
+    def _checkRequestOrigin(self):
+        """Refuse browser requests originating from a page we have not allowed.
+
+        Response headers alone do not protect this API. A cross-origin GET is sent by
+        the browser and executed here; CORS only stops the calling page from reading
+        the reply, by which point the lights have already changed. A disallowed
+        origin therefore has to be refused before the command runs, not just answered
+        without Access-Control headers.
+
+        Sec-Fetch-Site is what catches the requests that carry no Origin at all, such
+        as an <img> tag or a GET form pointed at a command URL. Requests with neither
+        header are not coming from a web page (curl, scripts, the address bar) and are
+        left alone.
+        """
+        fetchSite = self.headers.get("Sec-Fetch-Site", "").lower()
+        origin = self.headers.get("Origin", "")
+
+        if self._allowedOrigin() is not None:
+            return True # named in httpAllowedOrigins, so allowed whatever the Host says
+
+        # Every remaining "this is our own page" case rests on the browser having
+        # reached us by a local address. A Host naming anything else means the page was
+        # loaded from a name that only resolves here because someone made it, so the
+        # browser's same-origin verdict cannot be taken at face value.
+        if self._hostIsLocal():
+            if fetchSite in ("same-origin", "none"):
+                return True # our own dashboard, or the user typing the address in
+
+            if fetchSite == "" and origin == "":
+                return True # no browser involved
+
+            if origin != "" and origin == self._ownOrigin():
+                return True # same origin, on a browser too old to send Sec-Fetch-Site
+        elif fetchSite == "" and origin == "":
+            return True # not a browser at all: curl, a script, a Host-less HTTP/1.0 client
+
+        self.send_error(403, "This request came from a web page at " + (origin or "another site") + ", which is not "
+                             "allowed to control your lights. Add that origin to the allowed origins list in Global "
+                             "Preferences if you meant to permit it.")
+        return False
+
+    def _checkClientIP(self):
+        """Reject the request unless the client is in the allowed networks."""
+        clientIP = self.client_address[0]
+
+        if isAcceptedClientIP(clientIP):
+            return True
+
+        self.send_error(403, "The IP of the device you're making the request from (" + clientIP + ") is not in the "
+                             "list of accepted addresses for the NeewerLux HTTP Server. To use this device with "
+                             "NeewerLux, add its address or network to the list of acceptable IPs in Global "
+                             "Preferences. Entries can be a single address (192.168.1.50) or a range in CIDR "
+                             "notation (192.168.1.0/24).")
+        return False
+
     def do_OPTIONS(self):
+        if not self._checkClientIP():
+            return
+
+        if self._allowedOrigin() is None:
+            # Refusing the preflight is what tells the browser the cross-origin call
+            # is not permitted, rather than letting the real request through.
+            self.send_error(403, "Cross-origin requests are not enabled. Add the calling origin to the allowed "
+                                 "origins list in Global Preferences to permit it.")
+            return
+
         self.send_response(200)
         self._send_cors_headers()
         self.end_headers()
@@ -6238,16 +6514,11 @@ class NLPythonServer(BaseHTTPRequestHandler):
 
             # CHECK TO SEE IF THE IP REQUESTING ACCESS IS IN THE LIST OF "acceptable_HTTP_IPs"
             clientIP = self.client_address[0] # the IP address of the machine making the request
-            acceptedIP = False
 
-            for check in range(len(acceptable_HTTP_IPs)): # check all the "accepted" IP addresses against the current requesting IP
-                if acceptedIP != True: # if we haven't found the IP in the accepted list, then keep checking
-                    if acceptable_HTTP_IPs[check] in clientIP:
-                        acceptedIP = True # if we're good to go, then we can just move on
+            if not self._checkClientIP():
+                return
 
-            # IF THE IP MAKING THE REQUEST IS NOT IN THE LIST OF APPROVED ADDRESSES, THEN RETURN A "FORBIDDEN" ERROR
-            if acceptedIP == False:
-                self.send_error(403, "The IP of the device you're making the request from (" + clientIP + ") has to be in the list of accepted IP addresses in order to use the NeewerLux HTTP Server, any outside addresses will generate this Forbidden error.  To use this device with NeewerLux, add its IP address (or range of IP addresses) to the list of acceptable IPs")
+            if not self._checkRequestOrigin():
                 return
 
             acceptableURL = "/NeewerLux/doAction?"
@@ -6557,15 +6828,12 @@ class NLPythonServer(BaseHTTPRequestHandler):
         Response: JSON with per-command results.
         """
         # IP CHECK (same as do_GET)
-        clientIP = self.client_address[0]
-        acceptedIP = False
-        for check in range(len(acceptable_HTTP_IPs)):
-            if acceptedIP != True:
-                if acceptable_HTTP_IPs[check] in clientIP:
-                    acceptedIP = True
+        clientIP = self.client_address[0] # used by the per-endpoint log lines below
 
-        if acceptedIP == False:
-            self.send_error(403, "Forbidden - IP " + clientIP + " is not in the list of accepted addresses")
+        if not self._checkClientIP():
+            return
+
+        if not self._checkRequestOrigin():
             return
 
         # ONLY ACCEPT REQUESTS TO SUPPORTED POST ENDPOINTS
@@ -6862,7 +7130,7 @@ def resolveCustomPresetsFile():
 def loadPrefsFile(globalPrefsFile = ""):
     global findLightsOnStartup, autoConnectToLights, printDebug, maxNumOfAttempts, \
            rememberLightsOnExit, acceptable_HTTP_IPs, customKeys, enableTabsOnLaunch, \
-           whiteListedMACs, rememberPresetsOnExit, autoReconnectOnDisconnect, livePreview, hideConsoleOnLaunch, minimizeToTrayOnClose, httpAutoStart, httpPort, cctFallbackMode, enableLogTab, logToFile, globalCCTMin, globalCCTMax
+           whiteListedMACs, rememberPresetsOnExit, autoReconnectOnDisconnect, livePreview, hideConsoleOnLaunch, minimizeToTrayOnClose, httpAutoStart, httpPort, httpBindAddress, httpAllowedOrigins, cctFallbackMode, enableLogTab, logToFile, globalCCTMin, globalCCTMax
 
     if globalPrefsFile != "":
         printDebugString("Loading global preferences from file...")
@@ -6875,7 +7143,7 @@ def loadPrefsFile(globalPrefsFile = ""):
             "SC_Dec_Bri_Small", "SC_Inc_Bri_Small", "SC_Dec_Bri_Large", "SC_Inc_Bri_Large", \
             "SC_Dec_1_Small", "SC_Inc_1_Small", "SC_Dec_2_Small", "SC_Inc_2_Small", "SC_Dec_3_Small", "SC_Inc_3_Small", \
             "SC_Dec_1_Large", "SC_Inc_1_Large", "SC_Dec_2_Large", "SC_Inc_2_Large", "SC_Dec_3_Large", "SC_Inc_3_Large", \
-            "enableTabsOnLaunch", "whiteListedMACs", "rememberPresetsOnExit", "autoReconnectOnDisconnect", "hideConsoleOnLaunch", "minimizeToTrayOnClose", "livePreview", "httpAutoStart", "httpPort", "cctFallbackMode", "enableLogTab", "logToFile", "globalCCTMin", "globalCCTMax"]
+            "enableTabsOnLaunch", "whiteListedMACs", "rememberPresetsOnExit", "autoReconnectOnDisconnect", "hideConsoleOnLaunch", "minimizeToTrayOnClose", "livePreview", "httpAutoStart", "httpPort", "httpBindAddress", "httpAllowedOrigins", "cctFallbackMode", "enableLogTab", "logToFile", "globalCCTMin", "globalCCTMax"]
 
         # KICK OUT ANY PARAMETERS THAT AREN'T IN THE "ACCEPTABLE ARGUMENTS" LIST ABOVE
         # THIS SECTION OF CODE IS *SLIGHTLY* DIFFERENT THAN THE CLI KICK OUT CODE
@@ -6898,7 +7166,9 @@ def loadPrefsFile(globalPrefsFile = ""):
     prefsParser.add_argument("--printDebug", default=1)
     prefsParser.add_argument("--maxNumOfAttempts", default=6)
     prefsParser.add_argument("--rememberLightsOnExit", default=0)
-    prefsParser.add_argument("--acceptableIPs", default=["127.0.0.1", "192.168.", "10."])
+    # Loopback only by default, matching the default bind address. Widen this (and
+    # httpBindAddress) to reach the server from other machines on the network.
+    prefsParser.add_argument("--acceptableIPs", default=list(defaultAcceptableIPs))
     prefsParser.add_argument("--whiteListedMACs" , default=[])
     prefsParser.add_argument("--rememberPresetsOnExit", default=1)
     prefsParser.add_argument("--livePreview", default=1)
@@ -6907,6 +7177,8 @@ def loadPrefsFile(globalPrefsFile = ""):
     prefsParser.add_argument("--minimizeToTrayOnClose", default=1)
     prefsParser.add_argument("--httpAutoStart", default=0)
     prefsParser.add_argument("--httpPort", default=8080)
+    prefsParser.add_argument("--httpBindAddress", default="127.0.0.1")
+    prefsParser.add_argument("--httpAllowedOrigins", default=[])
     prefsParser.add_argument("--cctFallbackMode", default="convert")
     prefsParser.add_argument("--enableLogTab", default=1)
     prefsParser.add_argument("--logToFile", default=0)
@@ -6964,6 +7236,18 @@ def loadPrefsFile(globalPrefsFile = ""):
             httpPort = 8080
     except (ValueError, TypeError):
         httpPort = 8080
+
+    # Only two bind addresses make sense here: loopback, or every interface. Anything
+    # unrecognised falls back to loopback rather than guessing and exposing the server.
+    httpBindAddress = str(mainPrefs.httpBindAddress).strip()
+    if httpBindAddress not in ("127.0.0.1", "::1", "0.0.0.0", "::"):
+        httpBindAddress = "127.0.0.1"
+
+    if type(mainPrefs.httpAllowedOrigins) is not list:
+        httpAllowedOrigins = [origin for origin in mainPrefs.httpAllowedOrigins.replace(" ", "").split(";") if origin != ""]
+    else:
+        httpAllowedOrigins = mainPrefs.httpAllowedOrigins
+
     cctFallbackMode = mainPrefs.cctFallbackMode if mainPrefs.cctFallbackMode in ("convert", "ignore") else "convert"
     enableLogTab = bool(int(mainPrefs.enableLogTab))
     logToFile = bool(int(mainPrefs.logToFile))
@@ -7044,10 +7328,11 @@ if __name__ == '__main__':
             httpWorker = threading.Thread(target=workerThread, args=(asyncioEventLoop,), name="workerThread", daemon=True)
             httpWorker.start()
 
-            webServer = ThreadingHTTPServer(("", httpPort), NLPythonServer)
+            webServer = NeewerLuxHTTPServer((httpBindAddress, httpPort), NLPythonServer)
 
             try:
-                printDebugString("Starting the HTTP Server on Port " + str(httpPort) + "...")
+                printDebugString("Starting the HTTP Server on " + httpBindAddress + ":" + str(httpPort) + "...")
+                logHTTPServerExposure()
                 printDebugString("-------------------------------------------------------------------------------------")
 
                 # start the HTTP server and wait for requests

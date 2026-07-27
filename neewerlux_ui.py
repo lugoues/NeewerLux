@@ -757,6 +757,14 @@ class Ui_MainWindow(object):
         self.httpPortField = QLineEdit("8080")
         self.httpPortField.setFixedWidth(70)
         self.httpPortField.setToolTip("Port for the HTTP server (1024-65535, default 8080). Restart the server to apply.")
+        self.httpBindCombo = QComboBox()
+        self.httpBindCombo.addItems(["This computer only (127.0.0.1)", "All network interfaces (0.0.0.0)"])
+        self.httpBindCombo.setToolTip("Which machines can reach the HTTP server.\n\n"
+            "This computer only: nothing outside this machine can connect. This is the default.\n"
+            "All network interfaces: other devices on your network can connect, provided their\n"
+            "address is also in the accepted IP list below.\n\n"
+            "Anyone who can reach the server can control your lights, so only open this up on a\n"
+            "network you trust. Restart the server to apply.")
         cctFallbackRow = QHBoxLayout()
         cctFallbackLabel = QLabel("Incompatible command handling:")
         self.cctFallbackCombo = QComboBox()
@@ -875,6 +883,7 @@ class Ui_MainWindow(object):
         self.globalPrefsLay.addRow(QLabel("<br><strong>HTTP Server</strong>"))
         self.globalPrefsLay.addRow(self.httpAutoStart_check)
         self.globalPrefsLay.addRow("HTTP server port:", self.httpPortField)
+        self.globalPrefsLay.addRow("HTTP server reachable from:", self.httpBindCombo)
 
         self.globalPrefsLay.addRow(QLabel("<br><strong>Window &amp; Display</strong>"))
         self.globalPrefsLay.addRow(self.hideConsoleOnLaunch_check)

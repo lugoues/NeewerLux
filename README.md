@@ -145,6 +145,36 @@ A browser-based control panel at `http://localhost:8080/`:
 - Update checker
 - Collapsible API reference
 
+### HTTP Server Access Control
+
+Anyone who can reach the HTTP server can control your lights, so it is locked to this
+machine by default.
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `httpBindAddress` | `127.0.0.1` | Which interface to listen on. `0.0.0.0` makes the server reachable from other devices on your network. |
+| `acceptableIPs` | `127.0.0.1`, `::1` | Which client addresses may issue commands. |
+| `httpAllowedOrigins` | empty | Browser origins permitted to make cross-origin calls. Empty means no cross-origin access at all. |
+
+To reach the dashboard from a phone or a second machine you need to change **two**
+settings, the bind address and the accepted IP list. Both live in Global Preferences.
+
+`acceptableIPs` entries can be a single address (`192.168.1.50`) or a network in CIDR
+notation (`192.168.1.0/24`). The older dotted-prefix style (`192.168.`, `10.`) still
+parses and is treated as the network it describes, so existing preference files keep
+working.
+
+`httpAllowedOrigins` only matters if you are calling the API from a web page served from
+somewhere else, such as a browser-based stream deck. The bundled dashboard is served by
+this same server and does not need it. Setting it to `*` allows any website you visit to
+control your lights, so use a specific origin instead.
+
+Requests that arrive from a web page not on that list are **refused before the command
+runs**, rather than merely being answered without CORS headers. Response headers alone
+would not help: a browser sends a cross-origin GET regardless and only blocks the calling
+page from reading the reply, by which point the lights have already changed. Requests with
+no browser headers at all (curl, scripts, the address bar) are unaffected.
+
 ### HTTP Animation API
 
 **GET:** `http://server:port/NeewerLux/doAction?animate=Concert%20Sweep|2.0|10|50`
