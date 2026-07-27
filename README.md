@@ -1,6 +1,11 @@
 # NeewerLux
 
-A cross-platform Neewer LED light control app for streamers and content creators. Features a keyframe animation engine with 101 presets, multi-light preset editor, visual animation editor, WebUI dashboard, and BLE parallel writes.
+A headless Neewer LED light controller. Runs as a service, talks to the lights over
+Bluetooth LE, and is driven entirely through its HTTP API and web dashboard. Includes a
+keyframe animation engine with 101 built-in animations, a preset system, and parallel
+BLE writes.
+
+There is no desktop GUI. If you want a window, use the upstream project this forks from.
 
 Fork of [NeewerLite-Python](https://github.com/taburineagle/NeewerLite-Python) (v0.12d) by [@taburineagle](https://github.com/taburineagle), originally based on [NeewerLite](https://github.com/keefo/NeewerLite) by [@keefo](https://github.com/keefo) (Xu Lian).
 
@@ -12,40 +17,39 @@ Fork of [NeewerLite-Python](https://github.com/taburineagle/NeewerLite-Python) (
 
 ## Installation
 
-### Windows Executable (Recommended)
-1. Download `NeewerLux-x.x.x-win64.zip` from the [Releases](https://github.com/poizenjam/NeewerLux/releases) page
-2. Extract to any folder
-3. Run `NeewerLux.exe`
+Requires Python 3.11 or newer, and a Bluetooth adapter with BlueZ on Linux.
 
-Preset and animation files are in the `light_prefs/` folder alongside the executable and can be edited manually with any text editor.
-
-### Running from Source
-
-Requires Python 3.11 or newer. Dependency versions are pinned in `uv.lock`, so an
-install from the lockfile reproduces exactly what the release builds against.
-
-Using [uv](https://docs.astral.sh/uv/) (recommended):
 ```
 uv sync --locked
 uv run NeewerLux.py
 ```
 
-Using pip. The version bounds match `pyproject.toml`, so this will not silently pull
-in a future PySide 7 or Bleak 4 that the app has not been tested against:
+With no arguments NeewerLux starts the HTTP server and serves the dashboard at
+http://localhost:8080/. Dependency versions are pinned in `uv.lock`, so this reproduces
+exactly what the release is built against.
+
+Using pip instead:
 ```
-pip install "PySide6>=6.7,<7" "bleak>=0.22,<4"
+pip install "bleak>=0.22,<4"
 python NeewerLux.py
 ```
 
-**Headless installs** (`--cli`, `--list`, `--http`) do not need Qt at all. To skip the
-GUI toolkit entirely:
-```
-uv sync --locked --no-default-groups
-uv run --no-default-groups NeewerLux.py --http
-```
-`uv run` re-syncs the environment before running, so `--no-default-groups` is needed on
-both commands. Without it on the second one, uv reinstates the GUI group and pulls
-PySide6 back in.
+### Other modes
+
+| Command | What it does |
+|---------|--------------|
+| `NeewerLux.py` | Start the HTTP server and dashboard (the default) |
+| `NeewerLux.py --http` | The same thing, stated explicitly |
+| `NeewerLux.py --list` | Scan for nearby lights and print them |
+| `NeewerLux.py --cli --light <MAC> --mode CCT --temp 56 --bri 50` | Send one command and exit |
+
+### Windows
+
+Download the release zip and run `NeewerLux.exe`, or `NeewerLux-HTTP.bat`. It is a
+console application, not a windowed one.
+
+Preset and animation files live in `light_prefs/` alongside the executable and can be
+edited with any text editor.
 
 ---
 
@@ -75,27 +79,14 @@ Each keyframe specifies a hold time (how long to dwell on the color), a fade tim
 | Multi-Light Utility | Color Chase, Ping Pong, Ripple, Alternating Flash, Gradient Sweep, Warm Cascade, Identify Lights |
 | Smooth/Ambient | Concert Sweep, Neon Nights, Retrowave, Stage Wash, Fire Flicker, Campfire, Candlelight, Sunset Fade, Ocean Waves, Northern Lights, Lava Lamp, Breathe, Color Wash, Color Cycle, Rainbow Gradient, Rainbow Chase, and many more |
 
-Six template generators are available from the GUI for creating new animations. Animations can also be authored in the Visual Editor or JSON Editor.
-
-### Animation Editor
-
-A full visual editor for creating and editing animation keyframes:
-- Color-coded keyframe table showing mode, parameters, hold/fade timing, and light count per frame
-- **Light filter combo** — switch which light's parameters are displayed in the keyframe table for multi-light animations
-- Per-light parameter editing with **+ Light** / **- Light** buttons within each keyframe
-- **GradientSlider controls** — hue rainbow, saturation, brightness, and CCT sliders with visual gradient bars matching the main GUI, dynamic suffixes, endpoint labels, and value readouts that switch based on mode
-- Scene dropdown for built-in animation modes
-- Live color preview bar
-- Copy/paste settings between keyframes
-- Add, duplicate, delete, and reorder frames
-- Synced JSON editor tab for power users
-- Size persistence across sessions
+Animations are JSON files in `light_prefs/animations/` and can be written by hand or
+generated from the six built-in templates. Six template generators ship with the code.
 
 ### Preset System
 
-Presets are displayed as an 8-column scrollable button grid with right-click context menu:
+Presets are stored in `light_prefs/customLights.prefs` and exposed on the dashboard and
+over the HTTP API:
 - **Save Current Settings** — capture current slider positions
-- **Edit Preset** — opens the visual Preset Editor
 - **Rename** — custom preset names (also via middle-click)
 - **Move Left/Right** — reorder presets
 - **Duplicate Preset** — deep-copy with "(copy)" suffix
@@ -103,21 +94,11 @@ Presets are displayed as an 8-column scrollable button grid with right-click con
 
 Ships with 8 default presets: Warm Studio, Daylight, Cool White, Candlelight, Red Alert, Blue Mood, Purple Haze, Green Screen.
 
-### Preset Editor
-
-A visual editor for configuring preset settings, matching the animation editor's layout:
-- Entry table showing target, mode, and parameter summary with color-coded mode cells
-- Toolbar: Add Entry, Duplicate, Delete, Move Up/Down, Copy, Paste
-- **GradientSlider controls** — same visual gradient bars as the main GUI and animation editor
-- Scene dropdown with named scenes
-- Per-light targeting with guardrails: "All Lights" disabled when multiple entries exist, duplicate targets prevented
-- Copy/paste copies mode + values (not target), enabling quick setup of similar settings across lights
-- Live color preview bar
-- Size persistence across sessions
-
 ### Global CCT Range
 
-Configurable minimum/maximum color temperature bounds in Global Preferences (2700K–8500K, default 3200K–5600K). Applies to the CCT tab, Preset Editor, and Animation Editor. Per-light CCT range overrides in Light Preferences take precedence for individual lights.
+Configurable minimum and maximum colour temperature bounds set in the preferences file
+(2700K-8500K, default 3200K-5600K). Per-light overrides in a light's sidecar file take
+precedence for that light.
 
 ### CCT Clamping & Incompatibility Handling
 
@@ -129,8 +110,8 @@ Also handles HSI/Scene commands sent to CCT-only lights. Ensures consistent beha
 
 ### Light Aliases (Preferred ID)
 
-The **Light Preferences** tab includes a **Preferred ID** field (0-99) alongside the custom name:
-- GUI table reorders so preferred-ID lights appear first, in ID order
+Each light's sidecar file in `light_prefs/` can carry a **Preferred ID** (0-99) alongside a custom name:
+- Lights are listed preferred-ID first, in ID order
 - Animation keyframes can use names (e.g., `"Key"`, `"Fill"`) as light targets
 - HTTP batch commands work with names: `?batch=Key:HSI:0:100:50;Fill:CCT:56:80`
 - Preferred IDs resolve consistently regardless of BLE discovery order
@@ -164,16 +145,10 @@ A browser-based control panel at `http://localhost:8080/`:
 
 ### Additional Features
 
-- **Thread safety** — all background-to-GUI updates via Qt signals
-- **Update checker** — GitHub Releases API, displayed in GUI and WebUI
-- **Instance lock** — PID-based with stale lock detection
-- **Log tab** — thread-safe buffered file writes, auto-scroll, clear/save
-- **Info tab** — quick start guide, HTTP API reference, clickable links
-- **Console management** — auto-hidden for exe builds, toggle in preferences
-- **System tray integration** — minimize to tray on close, context menu
-- **Dark/light theme** — full QSS theme system
-- **PySide6 compatibility** — PySide2 fallback preserved
-- **Auto-reconnect on wake** — background worker re-links lights after sleep
+- **Update checker** — GitHub Releases API, shown on the dashboard
+- **Instance lock** — PID-based, with stale lock detection
+- **Logging** — buffered writes to `light_prefs/NeewerLux.log`
+- **Auto-reconnect on wake** — the background worker re-links lights after sleep
 - **Parallel BLE writes** — `asyncio.gather()` for simultaneous multi-light commands
 
 ---
