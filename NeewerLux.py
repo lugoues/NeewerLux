@@ -2287,6 +2287,8 @@ try: # try to load the GUI
                     printDebugString("You don't have any new preferences to save, so we aren't saving any!")
 
         def setupGlobalLightPrefsTab(self, setDefault=False):
+            global httpAllowedOrigins, httpBindAddress # cleared by the reset path below
+
             if setDefault == False:
                 self.findLightsOnStartup_check.setChecked(findLightsOnStartup)
                 self.autoConnectToLights_check.setChecked(autoConnectToLights)
@@ -2348,6 +2350,11 @@ try: # try to load the GUI
                 self.httpAutoStart_check.setChecked(False)
                 self.httpPortField.setText("8080")
                 self.httpBindCombo.setCurrentIndex(0)  # This computer only
+                # No field represents this, so without clearing it here "Reset
+                # Preferences to Defaults" would leave the server cross-origin
+                # accessible with no way to turn it off from the interface.
+                httpAllowedOrigins = []
+                httpBindAddress = "127.0.0.1"
                 self.cctFallbackCombo.setCurrentIndex(0)  # Convert
                 self.enableLogTab_check.setChecked(True)
                 self.logToFile_check.setChecked(False)
@@ -2471,7 +2478,16 @@ try: # try to load the GUI
             if httpPort != 8080: # only save non-default
                 finalPrefs.append("httpPort=" + str(httpPort))
 
-            httpBindAddress = "0.0.0.0" if self.httpBindCombo.currentIndex() == 1 else "127.0.0.1"
+            # The combo has two entries but four values are valid, so a configured "::1"
+            # or "::" must not be flattened to its IPv4 spelling just because the user
+            # saved some unrelated setting. Only rewrite the address if the selection
+            # actually disagrees with what is loaded.
+            wantsAllInterfaces = (self.httpBindCombo.currentIndex() == 1)
+            hasAllInterfaces = httpBindAddress in ("0.0.0.0", "::")
+
+            if wantsAllInterfaces != hasAllInterfaces:
+                httpBindAddress = "0.0.0.0" if wantsAllInterfaces else "127.0.0.1"
+
             if httpBindAddress != "127.0.0.1": # only save non-default
                 finalPrefs.append("httpBindAddress=" + httpBindAddress)
 
@@ -6362,6 +6378,44 @@ class NLPythonServer(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+    def _hostIsLocal(self):
+        """Whether the Host header names this server by an address we expect.
+
+        This is the DNS rebinding defence. An attacker can point a name they control
+        at 127.0.0.1, and the browser will then treat http://their-name:8080 as the
+        same origin as this server and say so in Sec-Fetch-Site. The connection really
+        does arrive from loopback, so the address allowlist passes it too. What gives
+        it away is the Host header, which still carries the attacker's name, so any
+        Host that is not a literal local address is refused.
+        """
+        host = self.headers.get("Host", "")
+
+        if host == "":
+            return False
+
+        # Strip the port. A bracketed IPv6 literal keeps its colons.
+        if host.startswith("["):
+            hostName = host[1:host.find("]")] if "]" in host else host
+        else:
+            hostName = host.split(":")[0]
+
+        hostName = hostName.strip().lower()
+
+        if hostName == "localhost":
+            return True
+
+        try:
+            address = ipaddress.ip_address(hostName)
+        except ValueError:
+            return False # a name rather than a literal address, so not trusted
+
+        if address.is_loopback:
+            return True
+
+        # Reaching the server over the LAN means Host is whatever address the client
+        # dialled, which has to be one this server is actually bound to.
+        return httpBindAddress in ("0.0.0.0", "::") or hostName == httpBindAddress
+
     def _ownOrigin(self):
         """The origin this request was addressed to, for comparing against Origin."""
         host = self.headers.get("Host", "")
@@ -6384,17 +6438,24 @@ class NLPythonServer(BaseHTTPRequestHandler):
         fetchSite = self.headers.get("Sec-Fetch-Site", "").lower()
         origin = self.headers.get("Origin", "")
 
-        if fetchSite in ("same-origin", "none"):
-            return True # our own dashboard, or the user typing the address in
-
-        if fetchSite == "" and origin == "":
-            return True # no browser involved
-
-        if origin != "" and origin == self._ownOrigin():
-            return True # same origin, on a browser too old to send Sec-Fetch-Site
-
         if self._allowedOrigin() is not None:
-            return True # named in httpAllowedOrigins
+            return True # named in httpAllowedOrigins, so allowed whatever the Host says
+
+        # Every remaining "this is our own page" case rests on the browser having
+        # reached us by a local address. A Host naming anything else means the page was
+        # loaded from a name that only resolves here because someone made it, so the
+        # browser's same-origin verdict cannot be taken at face value.
+        if self._hostIsLocal():
+            if fetchSite in ("same-origin", "none"):
+                return True # our own dashboard, or the user typing the address in
+
+            if fetchSite == "" and origin == "":
+                return True # no browser involved
+
+            if origin != "" and origin == self._ownOrigin():
+                return True # same origin, on a browser too old to send Sec-Fetch-Site
+        elif fetchSite == "" and origin == "":
+            return True # not a browser at all: curl, a script, a Host-less HTTP/1.0 client
 
         self.send_error(403, "This request came from a web page at " + (origin or "another site") + ", which is not "
                              "allowed to control your lights. Add that origin to the allowed origins list in Global "
