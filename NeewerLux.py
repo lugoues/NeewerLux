@@ -10,7 +10,7 @@
 ## > https://github.com/keefo/NeewerLite <
 ############################################################
 ## A cross-platform Python script using the bleak and
-## PySide6 (or PySide2) libraries to control Neewer brand lights via
+## PySide6 libraries to control Neewer brand lights via
 ## Bluetooth on multiple platforms -
 ##          Windows, Linux/Ubuntu, MacOS and RPi
 ############################################################
@@ -76,28 +76,18 @@ if platform.system() == "Windows":
         except Exception:
             pass # modern bleak (0.20+) handles COM apartment threading internally
 
-importError = 0 # whether or not there's an issue loading PySide6/PySide2 or the GUI file
-PYSIDE_VERSION = 0
+importError = 0 # whether or not there's an issue loading PySide6 or the GUI file
 
-# IMPORT PYSIDE6 (preferred, actively maintained) OR PYSIDE2 (legacy fallback)
+# IMPORT PYSIDE6. Absence is not fatal: --cli, --list and --http never open a window,
+# so the GUI paths are the only ones that check importError.
 try:
     import PySide6
     from PySide6.QtCore import Qt, QItemSelectionModel, Signal as QtSignal
     from PySide6.QtGui import QLinearGradient, QColor, QKeySequence, QFont, QIcon, QShortcut
     from PySide6.QtWidgets import QApplication, QMainWindow, QTableWidgetItem, QMessageBox, QInputDialog, QListWidgetItem, QSizePolicy, QPushButton
-    PYSIDE_VERSION = 6
-
 except Exception as e:
     print(f"  [DEBUG] PySide6 import failed: {type(e).__name__}: {e}")
-    try:
-        import PySide2
-        from PySide2.QtCore import Qt, QItemSelectionModel, Signal as QtSignal
-        from PySide2.QtGui import QLinearGradient, QColor, QKeySequence, QFont, QIcon
-        from PySide2.QtWidgets import QApplication, QMainWindow, QTableWidgetItem, QShortcut, QMessageBox, QInputDialog, QListWidgetItem, QSizePolicy, QPushButton
-        PYSIDE_VERSION = 2
-    except Exception as e2:
-        print(f"  [DEBUG] PySide2 import failed: {type(e2).__name__}: {e2}")
-        importError = 1 # log that we can't find either PySide version
+    importError = 1 # log that we can't find PySide6
 
 # IMPORT THE GUI ITSELF
 try:
@@ -165,13 +155,6 @@ try:
     from neewerlux_webui import getWebDashboardHTML
 except ImportError:
     getWebDashboardHTML = None
-
-# HELPER: PySide6 uses .exec(), PySide2 uses .exec_(), this calls the right one
-def pyside_exec(obj):
-    if hasattr(obj, 'exec'):
-        return obj.exec()
-    else:
-        return obj.exec_()
 
 def _resource_path(filename):
     """Absolute path to a bundled resource. PyInstaller unpacks to _MEIPASS; source runs use the script dir."""
@@ -628,20 +611,12 @@ try: # try to load the GUI
             """Open a dialog to edit preset settings. Mirrors the animation editor layout."""
             global customLightPresets
             from neewerlux_ui import GradientSlider as GSL
-            if PYSIDE_VERSION == 6:
-                from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout,
-                    QGridLayout as QGL, QLabel, QLineEdit, QComboBox, QSpinBox,
-                    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-                    QWidget as QW, QPushButton, QSizePolicy)
-                from PySide6.QtCore import Qt as QtC
-                from PySide6.QtGui import QColor, QBrush, QFont
-            else:
-                from PySide2.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout,
-                    QGridLayout as QGL, QLabel, QLineEdit, QComboBox, QSpinBox,
-                    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-                    QWidget as QW, QPushButton, QSizePolicy)
-                from PySide2.QtCore import Qt as QtC
-                from PySide2.QtGui import QColor, QBrush, QFont
+            from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout,
+                QGridLayout as QGL, QLabel, QLineEdit, QComboBox, QSpinBox,
+                QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+                QWidget as QW, QPushButton, QSizePolicy)
+            from PySide6.QtCore import Qt as QtC
+            from PySide6.QtGui import QColor, QBrush, QFont
 
             sceneNames = ["1: Police", "2: Ambulance", "3: Fire Truck", "4: Fireworks",
                           "5: Party", "6: Candlelight", "7: Lightning", "8: Paparazzi", "9: TV Screen"]
@@ -1101,7 +1076,7 @@ try: # try to load the GUI
             except Exception:
                 pass
 
-            result_code = pyside_exec(dlg)
+            result_code = dlg.exec()
 
             # Save size
             try:
@@ -1327,11 +1302,7 @@ try: # try to load the GUI
 
         def animNew(self):
             """Create a new animation from a template."""
-            # Use global PYSIDE_VERSION
-            if PYSIDE_VERSION == 6:
-                from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout as QFL, QLabel as QL, QLineEdit as QLE, QComboBox as QCB, QSpinBox as QSB, QCheckBox as QCK
-            else:
-                from PySide2.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout as QFL, QLabel as QL, QLineEdit as QLE, QComboBox as QCB, QSpinBox as QSB, QCheckBox as QCK
+            from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout as QFL, QLabel as QL, QLineEdit as QLE, QComboBox as QCB, QSpinBox as QSB, QCheckBox as QCK
 
             dlg = QDialog(self)
             dlg.setWindowTitle("New Animation")
@@ -1381,7 +1352,7 @@ try: # try to load the GUI
             buttons.rejected.connect(dlg.reject)
             layout.addWidget(buttons)
 
-            if pyside_exec(dlg) == QDialog.Accepted:
+            if dlg.exec() == QDialog.Accepted:
                 name = nameField.text().strip() or "Untitled"
                 templateName = templateCombo.currentText()
                 lightsStr = lightsField.text().strip() or "*"
@@ -1448,7 +1419,7 @@ try: # try to load the GUI
             except Exception:
                 pass
 
-            result_code = pyside_exec(dlg)
+            result_code = dlg.exec()
 
             # Save the editor dialog size for next time (regardless of OK/Cancel)
             try:
@@ -1481,13 +1452,8 @@ try: # try to load the GUI
 
         def _animEditJSON(self, name):
             """Fallback JSON-only animation editor."""
-            # Use global PYSIDE_VERSION
-            if PYSIDE_VERSION == 6:
-                from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout as QHL, QFormLayout as QFL, \
-                    QLabel as QL, QLineEdit as QLE, QSpinBox as QSB, QCheckBox as QCK, QTextEdit as QTE, QPushButton as QPB
-            else:
-                from PySide2.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout as QHL, QFormLayout as QFL, \
-                    QLabel as QL, QLineEdit as QLE, QSpinBox as QSB, QCheckBox as QCK, QTextEdit as QTE, QPushButton as QPB
+            from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout as QHL, QFormLayout as QFL, \
+                QLabel as QL, QLineEdit as QLE, QSpinBox as QSB, QCheckBox as QCK, QTextEdit as QTE, QPushButton as QPB
 
             anim = savedAnimations[name]
 
@@ -1522,7 +1488,7 @@ try: # try to load the GUI
             buttons.rejected.connect(dlg.reject)
             layout.addWidget(buttons)
 
-            if pyside_exec(dlg) == QDialog.Accepted:
+            if dlg.exec() == QDialog.Accepted:
                 try:
                     newKeyframes = json.loads(jsonEdit.toPlainText())
                     if not isinstance(newKeyframes, list):
@@ -1531,7 +1497,7 @@ try: # try to load the GUI
                     errDlg = QMessageBox(self)
                     errDlg.setWindowTitle("JSON Error")
                     errDlg.setText("Invalid keyframe JSON:\n" + str(e))
-                    pyside_exec(errDlg)
+                    errDlg.exec()
                     return
 
                 newName = nameField.text().strip() or name
@@ -1785,7 +1751,7 @@ try: # try to load the GUI
                     
                 sortDlg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
                 sortDlg.setIcon(QMessageBox.Warning)
-                clickedButton = pyside_exec(sortDlg)
+                clickedButton = sortDlg.exec()
 
                 if clickedButton == 0:
                     sortingField = 10 # sort by RSSI
@@ -3376,7 +3342,7 @@ try: # try to load the GUI
                     errDlg.setText("You can't save a custom preset at the moment because you don't have any lights set up yet.  To save a custom preset, connect a light to NeewerLux first.")
                     errDlg.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
                     errDlg.setIcon(QMessageBox.Warning)
-                    pyside_exec(errDlg)
+                    errDlg.exec()
                 else: # we have lights, we can do it!
                     selectedLights = self.selectedLights() # get the currently selected lights
 
@@ -3398,7 +3364,7 @@ try: # try to load the GUI
                     saveDlg.addButton(" Cancel ", QMessageBox.ButtonRole.RejectRole)           
                     saveDlg.setIcon(QMessageBox.Question)
 
-                    clickedButton = pyside_exec(saveDlg)
+                    clickedButton = saveDlg.exec()
                     
                     if clickedButton == 0: # save a "Global" preset
                         saveCustomPreset("global", numOfPreset)
@@ -7149,11 +7115,7 @@ if __name__ == '__main__':
     if cmdReturn[0] == True: # launch the GUI with the command-line arguments
         if importError == 0:
             try: # try to load the GUI
-                # Enable high-DPI scaling (PySide2/Qt5 needs explicit opt-in; Qt6 does it automatically)
-                if PYSIDE_VERSION == 2:
-                    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-                    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-                    
+                # Qt6 enables high-DPI scaling on its own, so there is nothing to opt into.
                 app = QApplication(sys.argv)
                 
                 if anotherInstance == True: # different than the CLI handling, the GUI needs to show a dialog box asking to quit or launch
@@ -7166,7 +7128,7 @@ if __name__ == '__main__':
                     errDlg.setDefaultButton(quitBtn)
                     errDlg.setIcon(QMessageBox.Warning)
 
-                    pyside_exec(errDlg)
+                    errDlg.exec()
 
                     if errDlg.clickedButton() == quitBtn:
                         sys.exit(1)
@@ -7212,11 +7174,14 @@ if __name__ == '__main__':
                 print("[TRACE] animRefreshList() complete")
 
                 # START THE BACKGROUND THREAD
-                workerThread = threading.Thread(target=workerThread, args=(asyncioEventLoop,), name="workerThread", daemon=True)
-                workerThread.start()
+                # Named guiWorker rather than workerThread: assigning to the latter here
+                # rebinds the module-level name from the function to this Thread object,
+                # so a second pass through would call a Thread and raise TypeError.
+                guiWorker = threading.Thread(target=workerThread, args=(asyncioEventLoop,), name="workerThread", daemon=True)
+                guiWorker.start()
                 print("[TRACE] workerThread started, entering event loop...")
 
-                ret = pyside_exec(app)
+                ret = app.exec()
                 print("[TRACE] event loop exited with code " + str(ret))
                 singleInstanceUnlockandQuit(ret) # delete the lock file and quit out
             except NameError as e:
@@ -7228,9 +7193,9 @@ if __name__ == '__main__':
                 print("[CRASH] Exception during GUI startup:")
                 traceback.print_exc()
         else:
-            if importError == 1: # we can't load PySide6 or PySide2
+            if importError == 1: # we can't load PySide6
                 print(" ===== CAN NOT FIND PYSIDE LIBRARY =====")
-                print(" You don't have PySide6 (or PySide2) installed.  If you're only running NeewerLux from")
+                print(" You don't have PySide6 installed.  If you're only running NeewerLux from")
                 print(" a command-line (from a Raspberry Pi CLI for instance), or using the HTTP server, you don't need this package.")
                 print(" If you want to launch NeewerLux with the GUI, you need to install PySide6.")
                 print()
@@ -7243,7 +7208,7 @@ if __name__ == '__main__':
             elif importError == 2: # we have PySide, but can't load the GUI file itself for some reason
                 print(" ===== COULD NOT LOAD/FIND GUI FILE =====")
                 print(" If you don't need to use the GUI, you are fine going without PySide6.")
-                print(" but using NeewerLux with the GUI requires PySide6 (or PySide2).")
+                print(" but using NeewerLux with the GUI requires PySide6.")
                 print()
                 print(" If you have already installed PySide6 but are still getting this error message,")
                 print(" Make sure you have the neewerlux_ui.py script in the same directory as NeewerLux.py")

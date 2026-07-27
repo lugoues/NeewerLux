@@ -4,37 +4,19 @@ Builds the widget tree and layouts. Widget attribute names are the
 contract with NeewerLux.py, which connects the signal handlers.
 """
 
-try:
-    import PySide6
-    from PySide6.QtCore import Qt, Signal, QSize
-    from PySide6.QtGui import QFont, QColor, QLinearGradient, QBrush, QKeySequence, QIcon, QPainter
-    from PySide6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-        QSplitter, QSizePolicy, QAbstractItemView, QAbstractScrollArea,
-        QPushButton, QLabel, QSlider, QTableWidget, QTableWidgetItem,
-        QTabWidget, QCheckBox, QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox, QAbstractButton,
-        QGraphicsView, QGraphicsScene, QScrollArea, QKeySequenceEdit,
-        QListWidget, QListWidgetItem, QStatusBar, QHeaderView, QFrame,
-        QSystemTrayIcon, QMenu, QTextBrowser
-    )
-    customSignal = Signal
-except ImportError:
-    try:
-        import PySide2
-        from PySide2.QtCore import Qt, Signal, QSize
-        from PySide2.QtGui import QFont, QColor, QLinearGradient, QBrush, QKeySequence, QIcon, QPainter
-        from PySide2.QtWidgets import (
-            QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-            QSplitter, QSizePolicy, QAbstractItemView, QAbstractScrollArea,
-            QPushButton, QLabel, QSlider, QTableWidget, QTableWidgetItem,
-            QTabWidget, QCheckBox, QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox, QAbstractButton,
-            QGraphicsView, QGraphicsScene, QScrollArea, QKeySequenceEdit,
-            QListWidget, QListWidgetItem, QStatusBar, QHeaderView, QFrame,
-            QSystemTrayIcon, QMenu, QTextBrowser
-        )
-        customSignal = Signal
-    except ImportError:
-        raise  # let it propagate, NeewerLux.py will handle the error
+import PySide6
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QFont, QColor, QLinearGradient, QBrush, QKeySequence, QIcon, QPainter
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
+    QSplitter, QSizePolicy, QAbstractItemView, QAbstractScrollArea,
+    QPushButton, QLabel, QSlider, QTableWidget, QTableWidgetItem,
+    QTabWidget, QCheckBox, QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox, QAbstractButton,
+    QGraphicsView, QGraphicsScene, QScrollArea, QKeySequenceEdit,
+    QListWidget, QListWidgetItem, QStatusBar, QHeaderView, QFrame,
+    QSystemTrayIcon, QMenu, QTextBrowser
+)
+customSignal = Signal
 
 
 # === HELPER WIDGETS ===
