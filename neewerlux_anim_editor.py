@@ -3,30 +3,16 @@
 import json
 import copy
 
-try:
-    import PySide6
-    from PySide6.QtCore import Qt, Signal
-    from PySide6.QtGui import QFont, QColor, QBrush
-    from PySide6.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
-        QLabel, QLineEdit, QSpinBox, QCheckBox, QComboBox, QPushButton,
-        QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox,
-        QTabWidget, QWidget, QTextEdit, QMessageBox, QAbstractItemView,
-        QSizePolicy, QSlider, QSplitter
-    )
-    PYSIDE_VERSION = 6
-except ImportError:
-    import PySide2
-    from PySide2.QtCore import Qt, Signal
-    from PySide2.QtGui import QFont, QColor, QBrush
-    from PySide2.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
-        QLabel, QLineEdit, QSpinBox, QCheckBox, QComboBox, QPushButton,
-        QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox,
-        QTabWidget, QWidget, QTextEdit, QMessageBox, QAbstractItemView,
-        QSizePolicy, QSlider, QSplitter
-    )
-    PYSIDE_VERSION = 2
+import PySide6
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont, QColor, QBrush
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
+    QLabel, QLineEdit, QSpinBox, QCheckBox, QComboBox, QPushButton,
+    QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox,
+    QTabWidget, QWidget, QTextEdit, QMessageBox, QAbstractItemView,
+    QSizePolicy, QSlider, QSplitter
+)
 
 
 def _colorForHSI(hue, sat, bri):
@@ -666,10 +652,7 @@ class AnimationEditorDialog(QDialog):
                 return
 
         # Prompt for light ID
-        try:
-            from PySide6.QtWidgets import QInputDialog
-        except ImportError:
-            from PySide2.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
         text, ok = QInputDialog.getText(self, "Add Light Target",
             "Light ID (number or name).\nUse * for all lights (only if no other lights defined).",
             text=newKey)
