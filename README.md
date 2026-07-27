@@ -195,8 +195,10 @@ scrape markup to find out what went wrong:
 {"success": false, "code": 403, "error": "The IP of the device you're making the request from ..."}
 ```
 
-A successful response means the command was accepted and understood, not that the lights
-have finished acting on it. BLE writes happen on a background thread.
+A successful response means the command was dispatched, not that every light has finished
+acting on it. The BLE write itself is queued for the worker thread. Commands that could
+not be dispatched at all report it rather than claiming success: an unknown animation
+answers `400`, and a worker still busy with an earlier command answers `409`.
 
 The legacy `nopage` parameter and the `?list_json` endpoint still work and are treated as
 requests for JSON.

@@ -5231,6 +5231,9 @@ def processHTMLCommands(paramsList, loop):
     asyncioEventLoop.run_until_complete() directly — that crashes when the worker
     thread is already using the event loop.  Instead, all BLE operations are
     queued via the global threadAction variable, which the worker thread polls.
+
+    Returns "" when the command was dispatched, or a short reason string when it was
+    not, so an HTTP caller can be told the difference between accepted and dropped.
     """
     global threadAction, numOfPresets, defaultLightPresets, customLightPresets
 
@@ -5242,10 +5245,10 @@ def processHTMLCommands(paramsList, loop):
     
     if threadAction not in ("", "HTTP"):
         printDebugString("The HTTP Server requested an action, but the worker thread is busy (" + threadAction + ") after waiting. Skipping.")
-        return
+        return "busy"
 
     if len(paramsList) == 0:
-        return
+        return "no parameters"
 
     # Stop any running animation for non-animation HTTP commands
     if paramsList[3] not in ("animate", "stop_animate", "list_animations") and animationRunning:
@@ -5353,9 +5356,11 @@ def processHTMLCommands(paramsList, loop):
             if revertOverride is not None:
                 global animRevertOnFinish
                 animRevertOnFinish = revertOverride
-            startAnimation(animName, loop, speedMult, loopOverride=loopOverride, fps=fps, briScale=briScale, maxLoops=maxLoops)
+            if not startAnimation(animName, loop, speedMult, loopOverride=loopOverride, fps=fps, briScale=briScale, maxLoops=maxLoops):
+                return "animation not found: " + animName
         else:
             printDebugString("HTTP: no animation name specified")
+            return "no animation name specified"
 
     elif paramsList[3] == "stop_animate":
         stopAnimation()
@@ -5387,7 +5392,7 @@ def processHTMLCommands(paramsList, loop):
             computedValue = [120, 129, 1, 2, 252]
         else:
             printDebugString("HTTP: Unknown mode '" + paramsList[3] + "'")
-            return
+            return "unknown mode: " + str(paramsList[3])
 
         selectedLights = returnLightIndexesFromMacAddress(paramsList[2])
 
@@ -6461,20 +6466,55 @@ class NLPythonServer(BaseHTTPRequestHandler):
                              "allowed to control your lights. Add that origin to the allowed origins list in Global "
                              "Preferences if you meant to permit it.")
         return False
+    def _acceptsJSONHeader(self):
+        """Read the Accept header and decide whether JSON is what the client wants.
+
+        Media types are case-insensitive and each range may carry a q value, so a
+        substring test gets this wrong twice over: it misses "Application/JSON" and it
+        picks JSON out of "application/json;q=0, text/html", where the client has said
+        JSON is precisely what it does not want.
+        """
+        try:
+            acceptHeader = self.headers.get("Accept", "")
+        except Exception:
+            return False # headers are unavailable, which happens on malformed requests
+
+        if acceptHeader.strip() == "":
+            return False
+
+        jsonQuality = 0.0
+        htmlQuality = 0.0
+
+        for mediaRange in acceptHeader.split(","):
+            parts = [part.strip() for part in mediaRange.split(";")]
+            mediaType = parts[0].lower()
+
+            quality = 1.0
+            for parameter in parts[1:]:
+                if parameter.lower().startswith("q="):
+                    try:
+                        quality = float(parameter[2:])
+                    except ValueError:
+                        quality = 0.0
+
+            if mediaType in ("application/json", "application/*"):
+                jsonQuality = max(jsonQuality, quality)
+            elif mediaType in ("text/html", "text/*"):
+                htmlQuality = max(htmlQuality, quality)
+
+        return jsonQuality > 0 and jsonQuality >= htmlQuality
+
     def _wantsJSON(self):
         """Whether this client asked for JSON rather than a rendered page.
 
-        Three ways to ask, in the order they are checked:
-          - Accept: application/json, the standard spelling
-          - a path ending in _json, which the dashboard already used
+        Three ways to ask:
+          - an Accept header preferring application/json, the standard spelling
+          - a path containing _json, which the dashboard already used
           - the legacy nopage parameter, which predates content negotiation and
             used to mean "run the command but skip the HTML"
         """
-        try:
-            if "application/json" in self.headers.get("Accept", ""):
-                return True
-        except Exception:
-            return False # headers are unavailable, which happens on malformed requests
+        if self._acceptsJSONHeader():
+            return True
 
         if "_json" in self.path:
             return True
@@ -6493,6 +6533,15 @@ class NLPythonServer(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(responseBody)
 
+    def _isListMode(self, queryPart):
+        """Whether "list" appears as a parameter, wherever it sits in the query.
+
+        ?list and ?nopage&list mean the same thing to the parser, so they must mean
+        the same thing here. Matching only on the start of the query made the answer
+        depend on parameter order.
+        """
+        return "list" in [parameter.split("=")[0].strip().lower() for parameter in queryPart.split("&")]
+
     def _sendDoActionJSON(self, paramsList):
         """The JSON form of a doAction response.
 
@@ -6505,7 +6554,7 @@ class NLPythonServer(BaseHTTPRequestHandler):
             return
 
         requestedMode = paramsList[3] if len(paramsList) > 3 else None
-        result = {"success": True, "mode": requestedMode, "request": self.path}
+        result = {"mode": requestedMode, "request": self.path}
 
         if len(paramsList) > 2 and paramsList[2] is not None:
             result["target"] = paramsList[2]
@@ -6525,16 +6574,26 @@ class NLPythonServer(BaseHTTPRequestHandler):
                                      "loop": animData.get("loop", False)}
                                     for animName, animData in sorted(savedAnimations.items())]
 
+        # Dispatch inline rather than on a detached thread, so the outcome can be
+        # reported. The HTML path fires and forgets, which is why it can claim success
+        # for an animation that does not exist. ThreadingHTTPServer already gives this
+        # request its own thread, so nothing is being blocked that was not before.
+        dispatchFailure = ""
+
+        if requestedMode != "list":
+            dispatchFailure = processHTMLCommands(paramsList, asyncioEventLoop) or ""
+
+        if dispatchFailure != "":
+            self.send_error(409 if dispatchFailure == "busy" else 400, "The command was not carried out: " + dispatchFailure)
+            return
+
+        result["success"] = True
+
+        # Read after dispatching, otherwise starting an animation reports the previous
+        # "not playing" and stopping one reports that it is still going.
         if requestedMode in ("animate", "stop_animate", "list_animations"):
             result["animationPlaying"] = animationRunning
             result["currentAnimation"] = currentAnimationName if animationRunning else None
-
-        # Same dispatch the HTML path uses. The work happens on another thread, so this
-        # response means the command was accepted and understood, not that the lights
-        # have finished responding to it.
-        if requestedMode != "list":
-            htmlProcessThread = threading.Thread(target=processHTMLCommands, args=(paramsList, asyncioEventLoop), name="htmlProcessThread")
-            htmlProcessThread.start()
 
         self._sendJSON(result)
 
@@ -6650,7 +6709,7 @@ class NLPythonServer(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-                if queryPart.startswith("list_json") or (isListRequest and wantsJSON):
+                if queryPart.startswith("list_json") or (isListRequest and wantsJSON) or (wantsJSON and self._isListMode(queryPart)):
                     # Return structured JSON for the web dashboard
                     self.send_response(200)
                     self._send_cors_headers()
@@ -6705,7 +6764,18 @@ class NLPythonServer(BaseHTTPRequestHandler):
 
                 # BREAK THE URL INTO USABLE PARAMTERS
                 paramsList = self.path.replace(acceptableURL, "").split("&") # split the included params into a list
-                paramsList = processCommands(paramsList) # process the commands returned from the HTTP parameters
+
+                try:
+                    paramsList = processCommands(paramsList) # process the commands returned from the HTTP parameters
+                except SystemExit:
+                    # argparse calls sys.exit() on a malformed argument such as "?mode"
+                    # with no value. Left alone that kills the request thread and drops
+                    # the connection without any response at all.
+                    self.send_error(400, "One of the parameters in the request was malformed. Check that every parameter that takes a value has one.")
+                    return
+                except (ValueError, TypeError) as e:
+                    self.send_error(400, "A parameter in the request had a value that could not be read: " + str(e))
+                    return
 
                 if wantsJSON:
                     self._sendDoActionJSON(paramsList)
