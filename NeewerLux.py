@@ -9,8 +9,8 @@
 ## Which is based on the NeewerLite project by Xu Lian (@keefo)
 ## > https://github.com/keefo/NeewerLite <
 ############################################################
-## A cross-platform Python script using the bleak and
-## PySide6 libraries to control Neewer brand lights via
+## A cross-platform Python service using the bleak library to control
+## Neewer brand lights via
 ## Bluetooth on multiple platforms -
 ##          Windows, Linux/Ubuntu, MacOS and RPi
 ############################################################
@@ -76,35 +76,8 @@ if platform.system() == "Windows":
         except Exception:
             pass # modern bleak (0.20+) handles COM apartment threading internally
 
-importError = 0 # whether or not there's an issue loading PySide6 or the GUI file
-
-# IMPORT PYSIDE6. Absence is not fatal: --cli, --list and --http never open a window,
-# so the GUI paths are the only ones that check importError.
-try:
-    import PySide6
-    from PySide6.QtCore import Qt, QItemSelectionModel, Signal as QtSignal
-    from PySide6.QtGui import QLinearGradient, QColor, QKeySequence, QFont, QIcon, QShortcut
-    from PySide6.QtWidgets import QApplication, QMainWindow, QTableWidgetItem, QMessageBox, QInputDialog, QListWidgetItem, QSizePolicy, QPushButton
-except Exception as e:
-    print(f"  [DEBUG] PySide6 import failed: {type(e).__name__}: {e}")
-    importError = 1 # log that we can't find PySide6
-
-# IMPORT THE GUI ITSELF
-try:
-    from neewerlux_ui import Ui_MainWindow
-    from neewerlux_theme import getThemeQSS
-    from neewerlux_webui import getWebDashboardHTML
-except Exception as e:
-    print(f"  [DEBUG] GUI module import failed: {type(e).__name__}: {e}")
-    if importError != 1: # if we don't already have a PySide issue
-        importError = 2 # log that we can't find the GUI file - which, if the program is downloaded correctly, shouldn't be an issue
-
-# IMPORT SYSTEM TRAY SUPPORT
-try:
-    from neewerlux_ui import QSystemTrayIcon, QMenu
-except ImportError:
-    QSystemTrayIcon = None
-    QMenu = None
+# IMPORT THE WEB DASHBOARD, which is the only user interface NeewerLux has.
+from neewerlux_webui import getWebDashboardHTML
 
 # SET WINDOWS APP ID SO THE TASKBAR SHOWS OUR ICON INSTEAD OF PYTHON'S
 try:
@@ -149,12 +122,6 @@ try:
     import urllib.parse # parsing custom light names in the HTTP server
 except Exception as e:
     pass # if there are any HTTP errors, don't do anything yet
-
-# IMPORT WEB DASHBOARD
-try:
-    from neewerlux_webui import getWebDashboardHTML
-except ImportError:
-    getWebDashboardHTML = None
 
 def _resource_path(filename):
     """Absolute path to a bundled resource. PyInstaller unpacks to _MEIPASS; source runs use the script dir."""
@@ -245,7 +212,6 @@ defaultLightPresets = buildDefaultPresets(numOfPresets)
 customLightPresets = buildDefaultPresets(numOfPresets)
 
 threadAction = "" # the current action to take from the thread
-mainWindow = None  # the GUI main window (None in HTTP-only mode)
 asyncioEventLoop = None # the current asyncio loop
 
 setLightUUID = "69400002-B5A3-F393-E0A9-E50E24DCCA99" # the UUID to send information to the light
@@ -372,3098 +338,37 @@ def doAnotherInstanceCheck():
         print("To force opening a new instance, add --force_instance to the command line.")
         sys.exit(1)
 
-try: # try to load the GUI
-    class MainWindow(QMainWindow, Ui_MainWindow):
-        # Thread-safe signal for updating the light table from background threads
-        _tableUpdateSignal = QtSignal(list, int)
-        # Thread-safe signal for update check results
-        _updateResultSignal = QtSignal(str, str, str, str)
-        # Thread-safe signal for appending log messages from any thread
-        _logSignal = QtSignal(str)
-
-        def __init__(self):
-            QMainWindow.__init__(self)
-            self.setupUi(self) # set up the main UI
-            self.setWindowTitle("NeewerLux " + NEEWERLUX_VERSION)
-            # Inject version into Info tab
-            self.infoText.setHtml(self.infoText.toHtml().replace("{VERSION}", NEEWERLUX_VERSION))
-            self.connectMe() # connect the function handlers to the widgets
-
-            # Connect the thread-safe table update signal
-            self._tableUpdateSignal.connect(self.setTheTable)
-
-            # Connect the log signal and log tab buttons
-            self._logSignal.connect(self._appendLog)
-            self.logClearButton.clicked.connect(lambda: self.logTextEdit.clear())
-            self.logSaveButton.clicked.connect(self._saveLogToFile)
-
-            # Connect update check button and result signal
-            self.checkUpdateButton.clicked.connect(self._checkForUpdates)
-            self._updateResultSignal.connect(self._onUpdateResult)
-
-            # Initialize theme (dark by default)
-            self._isDarkTheme = True
-            self._forceQuit = False
-            QApplication.instance().setStyleSheet(getThemeQSS(True))
-            self.themeToggleBtn.setText("\u263E")  # moon symbol
-
-            # Set window icon (shown in taskbar and title bar)
-            for _iconName in ("com.github.poizenjam.NeewerLux.png", "com.github.poizenjam.NeewerLux.ico"):
-                _iconPath = _resource_path(_iconName)
-                if os.path.exists(_iconPath):
-                    self.setWindowIcon(QIcon(_iconPath))
-                    break
-
-            # Set up system tray icon (minimize to tray on close)
-            self.setupSystemTray()
-
-            if enableTabsOnLaunch == False: # if we're not supposed to enable tabs on launch, then disable them all
-                self.ColorModeTabWidget.setTabEnabled(0, False) # disable the CCT tab on launch
-                self.ColorModeTabWidget.setTabEnabled(1, False) # disable the HSI tab on launch
-                self.ColorModeTabWidget.setTabEnabled(2, False) # disable the SCENE tab on launch
-                # Animations tab (index 3) is always enabled, no light selection needed
-                self.ColorModeTabWidget.setTabEnabled(4, False) # disable the LIGHT PREFS tab on launch
-                self.ColorModeTabWidget.setCurrentIndex(6)  # default to Info tab
-
-            if findLightsOnStartup == True: # if we're set up to find lights on startup, then indicate that
-                self.statusBar.showMessage("Please wait - searching for Neewer lights...")
-            else:
-                self.statusBar.showMessage("Welcome to NeewerLux!  Hit the Scan button above to scan for lights.")
-
-            if platform.system() == "Darwin": # if we're on MacOS, then change the column text for the 2nd column in the light table
-                self.lightTable.horizontalHeaderItem(1).setText("Light UUID")
-
-            # CREATE AND MARK ALL PRESET BUTTONS DYNAMICALLY
-            self.createPresetButtons()
-                
-            self.show
-
-        def createPresetButtons(self):
-            """Create (or recreate) all preset button widgets in an 8-column grid with a + placeholder."""
-            from neewerlux_ui import customPresetButton
-
-            # Clear existing layout
-            for btn in self.presetButtons:
-                btn.setParent(None)
-                btn.deleteLater()
-            self.presetButtons = []
-            # Remove any leftover items (stretch spacers etc.)
-            while self.customPresetButtonsLay.count():
-                item = self.customPresetButtonsLay.takeAt(0)
-                w = item.widget()
-                if w:
-                    w.setParent(None)
-
-            for i in range(numOfPresets):
-                name = presetNames.get(i, "")
-                label = name[:16] if name else "PRESET\nGLOBAL"
-                btn = customPresetButton(self.customPresetButtonsCW, text=str(i + 1) + "\n" + label)
-                btn.setMinimumHeight(58)
-                btn.setMinimumWidth(0)  # prevent text from widening the column
-                btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-
-                # Left-click = recall, right-click = context menu, middle-click = quick rename
-                btn.clicked.connect(lambda _checked=False, idx=i: recallCustomPreset(idx))
-                btn.rightclicked.connect(lambda idx=i: self._presetContextMenu(idx))
-                btn.middleclicked.connect(lambda idx=i: self.renamePresetDialog(idx))
-                btn.enteredWidget.connect(lambda idx=i: self.highlightLightsForSnapshotPreset(idx))
-                btn.leftWidget.connect(lambda idx=i: self.highlightLightsForSnapshotPreset(idx, True))
-
-                row, col = divmod(i, 8)
-                self.customPresetButtonsLay.addWidget(btn, row, col)
-                self.presetButtons.append(btn)
-
-            # "+" placeholder button at the end
-            addBtn = QPushButton("+")
-            addBtn.setMinimumHeight(58)
-            addBtn.setMinimumWidth(0)
-            addBtn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-            addBtn.setToolTip("Save a new preset here")
-            addBtn.setProperty("presetButton", True)
-            addBtn.setProperty("presetType", "default")
-            addBtn.clicked.connect(lambda: self._addAndSavePreset())
-            addRow, addCol = divmod(numOfPresets, 8)
-            self.customPresetButtonsLay.addWidget(addBtn, addRow, addCol)
-            self._addPresetButton = addBtn
-
-            # Mark custom presets and generate tooltips
-            for i in range(numOfPresets):
-                self._updatePresetTooltip(i)
-                if i < len(customLightPresets) and i < len(defaultLightPresets):
-                    name = presetNames.get(i, "")
-                    if customLightPresets[i] != defaultLightPresets[i]:
-                        if customLightPresets[i][0][0] == -1:
-                            self.presetButtons[i].markCustom(i, presetName=name)
-                        else:
-                            self.presetButtons[i].markCustom(i, 1, presetName=name)
-                    elif name:
-                        self.presetButtons[i].markCustom(i, -1, presetName=name)
-
-        def _presetContextMenu(self, idx):
-            """Show context menu for a preset button (right-click)."""
-            menu = QMenu(self)
-            saveAction = menu.addAction("Save Current Settings Here")
-            editAction = menu.addAction("Edit Preset...")
-            renameAction = menu.addAction("Rename")
-            menu.addSeparator()
-            moveLeftAction = menu.addAction("\u25C0 Move Left")
-            moveRightAction = menu.addAction("Move Right \u25B6")
-            menu.addSeparator()
-            dupAction = menu.addAction("Duplicate Preset")
-            deleteAction = menu.addAction("Delete Preset")
-
-            moveLeftAction.setEnabled(idx > 0)
-            moveRightAction.setEnabled(idx < numOfPresets - 1)
-
-            pos = self.presetButtons[idx].mapToGlobal(
-                self.presetButtons[idx].rect().center())
-            try:
-                action = menu.exec(pos)
-            except AttributeError:
-                action = menu.exec_(pos)
-
-            if action == saveAction:
-                self.saveCustomPresetDialog(idx)
-            elif action == editAction:
-                self._openPresetEditor(idx)
-            elif action == renameAction:
-                self.renamePresetDialog(idx)
-            elif action == moveLeftAction and idx > 0:
-                self._swapPresets(idx, idx - 1)
-            elif action == moveRightAction and idx < numOfPresets - 1:
-                self._swapPresets(idx, idx + 1)
-            elif action == dupAction:
-                self._duplicatePreset(idx)
-            elif action == deleteAction:
-                self._deletePreset(idx)
-
-        def _swapPresets(self, a, b):
-            """Swap two presets (data, names) and rebuild buttons."""
-            global customLightPresets, defaultLightPresets
-            customLightPresets[a], customLightPresets[b] = customLightPresets[b], customLightPresets[a]
-            defaultLightPresets[a], defaultLightPresets[b] = defaultLightPresets[b], defaultLightPresets[a]
-            nameA = presetNames.get(a, "")
-            nameB = presetNames.get(b, "")
-            if nameA:
-                presetNames[b] = nameA
-            else:
-                presetNames.pop(b, None)
-            if nameB:
-                presetNames[a] = nameB
-            else:
-                presetNames.pop(a, None)
-            self.createPresetButtons()
-            printDebugString("Swapped presets " + str(a + 1) + " and " + str(b + 1))
-
-        def _deletePreset(self, idx):
-            """Delete a specific preset, shift everything down."""
-            global numOfPresets, customLightPresets, defaultLightPresets
-            if numOfPresets <= 1:
-                return
-            reply = QMessageBox.question(self, "Delete Preset",
-                "Delete preset " + str(idx + 1) + "?\nAll presets after it will be renumbered.",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if reply != QMessageBox.Yes:
-                return
-            customLightPresets.pop(idx)
-            defaultLightPresets.pop(idx)
-            # Shift preset names down
-            newNames = {}
-            for k, v in presetNames.items():
-                if k < idx:
-                    newNames[k] = v
-                elif k > idx:
-                    newNames[k - 1] = v
-                # k == idx is deleted
-            presetNames.clear()
-            presetNames.update(newNames)
-            numOfPresets -= 1
-            self.createPresetButtons()
-            printDebugString("Deleted preset " + str(idx + 1) + ", " + str(numOfPresets) + " remaining")
-
-        def _duplicatePreset(self, idx):
-            """Duplicate a preset, inserting the copy immediately after it."""
-            global numOfPresets, customLightPresets, defaultLightPresets
-            import copy as _copy
-            newIdx = idx + 1
-            customLightPresets.insert(newIdx, _copy.deepcopy(customLightPresets[idx]))
-            defaultLightPresets.insert(newIdx, _copy.deepcopy(defaultLightPresets[idx]))
-            # Shift preset names up
-            newNames = {}
-            for k, v in presetNames.items():
-                if k <= idx:
-                    newNames[k] = v
-                else:
-                    newNames[k + 1] = v
-            # Copy the original name with " (copy)" suffix
-            if idx in presetNames:
-                origName = presetNames[idx]
-                copyName = (origName[:14] + " (copy)") if len(origName) > 14 else (origName + " (copy)")
-                newNames[newIdx] = copyName[:20]
-            presetNames.clear()
-            presetNames.update(newNames)
-            numOfPresets += 1
-            self.createPresetButtons()
-            self._savePresetsQuick()
-            printDebugString("Duplicated preset " + str(idx + 1) + " → " + str(newIdx + 1))
-
-        def _openPresetEditor(self, idx):
-            """Open a dialog to edit preset settings. Mirrors the animation editor layout."""
-            global customLightPresets
-            from neewerlux_ui import GradientSlider as GSL
-            from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout,
-                QGridLayout as QGL, QLabel, QLineEdit, QComboBox, QSpinBox,
-                QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-                QWidget as QW, QPushButton, QSizePolicy)
-            from PySide6.QtCore import Qt as QtC
-            from PySide6.QtGui import QColor, QBrush, QFont
-
-            sceneNames = ["1: Police", "2: Ambulance", "3: Fire Truck", "4: Fireworks",
-                          "5: Party", "6: Candlelight", "7: Lightning", "8: Paparazzi", "9: TV Screen"]
-            _stopsHue = [(0.0, QColor(255,0,0)), (0.16, QColor(255,255,0)), (0.33, QColor(0,255,0)),
-                         (0.49, QColor(0,255,255)), (0.66, QColor(0,0,255)), (0.83, QColor(255,0,255)), (1.0, QColor(255,0,0))]
-            _stopsSat = [(0.0, QColor(255,255,255)), (1.0, QColor(255,0,0))]
-            _stopsBri = [(0.0, QColor(0,0,0)), (1.0, QColor(255,255,255))]
-            _stopsCCT = [(0.0, QColor(255,147,41)), (1.0, QColor(201,226,255))]
-
-            def _targetLabel(t):
-                if t == -1 or t == "-1": return "All Lights"
-                return "Light " + str(t)
-
-            def _buildTargetChoices():
-                choices = [("All Lights (Global)", "-1")]
-                for i, light in enumerate(availableLights):
-                    prefID = light[8] if len(light) > 8 else 0
-                    cname = light[2]; model = light[0].name; mac = light[0].address
-                    if prefID > 0:
-                        choices.append((str(prefID) + " - " + (cname or model), str(prefID)))
-                    elif cname:
-                        choices.append((cname + " (" + model + ")", cname))
-                    else:
-                        choices.append((model + " [" + mac + "]", mac))
-                return choices
-
-            def _colorForHSI(h, s, b):
-                return QColor.fromHsv(h % 360, int(s * 2.55), int(b * 2.55))
-
-            def _colorForCCT(t, b):
-                frac = max(0, min(1, (t - 32) / max(1, 85 - 32)))
-                r = int(255 - frac * 54); g = int(147 + frac * 79); bl = int(41 + frac * 214)
-                bri = b / 100.0
-                return QColor(int(r * bri), int(g * bri), int(bl * bri))
-
-            # === Internal data: list of dicts ===
-            # {"target": str, "mode": "CCT"/"HSI"/"Scene", "bri": int, ...}
-            entries = []
-            selectedRow = [-1]
-            clipboard = [None]
-
-            def _presetToEntries(presetData, defaultData):
-                """Convert preset storage format to editor entries."""
-                result = []
-                if presetData == defaultData:
-                    return [{"target": "-1", "mode": "CCT", "temp": globalCCTMax // 100, "bri": 100}]
-                for item in presetData:
-                    t = item[0]; p = item[1] if len(item) > 1 else [5, 100, 56]
-                    e = {"target": str(t)}
-                    m = p[0]
-                    if m in (5, 8):
-                        e["mode"] = "CCT"; e["bri"] = p[1]; e["temp"] = p[2]
-                    elif m in (4, 7):
-                        e["mode"] = "HSI"; e["bri"] = p[1]; e["hue"] = p[2]
-                        e["sat"] = p[3] if len(p) > 3 else 100
-                    elif m in (6, 9):
-                        e["mode"] = "Scene"; e["bri"] = p[1]; e["scene"] = p[2]
-                    else:
-                        e["mode"] = "CCT"; e["bri"] = 100; e["temp"] = 56
-                    result.append(e)
-                return result or [{"target": "-1", "mode": "CCT", "temp": globalCCTMax // 100, "bri": 100}]
-
-            def _entriesToPreset():
-                """Convert editor entries to preset storage format."""
-                result = []
-                for e in entries:
-                    t = -1 if e["target"] == "-1" else e["target"]
-                    m = e.get("mode", "CCT")
-                    if m == "CCT":
-                        params = [5, e.get("bri", 100), e.get("temp", 56)]
-                    elif m == "HSI":
-                        params = [4, e.get("bri", 100), e.get("hue", 240), e.get("sat", 100)]
-                    elif m == "Scene":
-                        params = [6, e.get("bri", 100), e.get("scene", 1)]
-                    else:
-                        params = [5, 100, 56]
-                    result.append([t, params])
-                return result
-
-            # === DIALOG ===
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Edit Preset " + str(idx + 1))
-            dlg.setMinimumSize(600, 480)
-            dlg.resize(680, 560)
-            mainLay = QVBoxLayout(dlg)
-
-            # Name
-            nameRow = QHBoxLayout()
-            nameRow.addWidget(QLabel("Name:"))
-            nameField = QLineEdit(presetNames.get(idx, ""))
-            nameField.setPlaceholderText("Preset name (optional)")
-            nameRow.addWidget(nameField, 1)
-            mainLay.addLayout(nameRow)
-
-            # === TABLE ===
-            table = QTableWidget()
-            table.setColumnCount(6)
-            table.setHorizontalHeaderLabels(["#", "Target", "Mode", "Param 1", "Param 2", "Param 3"])
-            table.setSelectionBehavior(QAbstractItemView.SelectRows)
-            table.setSelectionMode(QAbstractItemView.SingleSelection)
-            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            table.setAlternatingRowColors(True)
-            hdr = table.horizontalHeader()
-            hdr.setStretchLastSection(True)
-            hdr.setSectionResizeMode(0, QHeaderView.Fixed)
-            table.setColumnWidth(0, 32)
-            for col in range(1, 6):
-                hdr.setSectionResizeMode(col, QHeaderView.Stretch)
-            mainLay.addWidget(table, 2)
-
-            # === TOOLBAR ===
-            toolbar = QHBoxLayout(); toolbar.setSpacing(4)
-            addBtn = QPushButton("+ Add Entry")
-            dupBtn = QPushButton("Duplicate")
-            delBtn = QPushButton("Delete")
-            upBtn = QPushButton("\u25B2 Up")
-            downBtn = QPushButton("\u25BC Down")
-            copyBtn = QPushButton("Copy")
-            copyBtn.setToolTip("Copy selected entry's settings")
-            pasteBtn = QPushButton("Paste")
-            pasteBtn.setToolTip("Paste settings to selected entry")
-            pasteBtn.setEnabled(False)
-            for btn in [addBtn, dupBtn, delBtn, upBtn, downBtn, copyBtn, pasteBtn]:
-                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                toolbar.addWidget(btn)
-            mainLay.addLayout(toolbar)
-
-            # === EDITOR PANEL ===
-            editorBox = QW()
-            editorBox.setObjectName("presetEditor")
-            editorLay = QVBoxLayout(editorBox)
-            editorLay.setContentsMargins(8, 8, 8, 8)
-            editorLay.setSpacing(6)
-            editorLay.addWidget(QLabel("<b>Entry Properties</b>"))
-
-            formGrid = QGL(); formGrid.setSpacing(6)
-
-            # Target
-            formGrid.addWidget(QLabel("Target:"), 0, 0)
-            targetCombo = QComboBox()
-            formGrid.addWidget(targetCombo, 0, 1)
-
-            # Mode
-            formGrid.addWidget(QLabel("Mode:"), 1, 0)
-            modeCombo = QComboBox()
-            modeCombo.addItems(["CCT", "HSI", "Scene"])
-            formGrid.addWidget(modeCombo, 1, 1)
-
-            # Gradient sliders
-            cctMinT = globalCCTMin // 100; cctMaxT = globalCCTMax // 100
-            p1Label = QLabel("Color Temp:")
-            formGrid.addWidget(p1Label, 2, 0)
-            p1Slider = GSL(cctMinT, cctMaxT, cctMaxT, "00K",
-                gradientStops=_stopsCCT, minLabel=str(globalCCTMin)+"K", maxLabel=str(globalCCTMax)+"K")
-            formGrid.addWidget(p1Slider, 2, 1)
-
-            p2Label = QLabel("Brightness:")
-            formGrid.addWidget(p2Label, 3, 0)
-            p2Slider = GSL(0, 100, 100, "%",
-                gradientStops=_stopsBri, minLabel="0", maxLabel="100")
-            formGrid.addWidget(p2Slider, 3, 1)
-
-            p3Label = QLabel("")
-            formGrid.addWidget(p3Label, 4, 0)
-            p3Slider = GSL(0, 100, 100, "%",
-                gradientStops=_stopsSat, minLabel="0", maxLabel="100")
-            p3Slider.setVisible(False)
-            formGrid.addWidget(p3Slider, 4, 1)
-
-            # Scene combo (visible in Scene mode, replaces p1)
-            sceneCombo = QComboBox()
-            for sn in sceneNames:
-                sceneCombo.addItem(sn)
-            sceneCombo.setVisible(False)
-            formGrid.addWidget(sceneCombo, 2, 1)
-
-            editorLay.addLayout(formGrid)
-
-            # Color preview
-            colorPreview = QLabel("")
-            colorPreview.setFixedHeight(24)
-            colorPreview.setStyleSheet("background-color: #555; border-radius: 4px;")
-            editorLay.addWidget(colorPreview)
-
-            # Apply button
-            applyBtn = QPushButton("Apply to Selected Entry")
-            editorLay.addWidget(applyBtn)
-
-            mainLay.addWidget(editorBox)
-
-            # OK / Cancel
-            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            buttons.accepted.connect(dlg.accept)
-            buttons.rejected.connect(dlg.reject)
-            mainLay.addWidget(buttons)
-
-            # === LOGIC ===
-
-            def _onModeChanged(modeText):
-                mode = modeText.upper() if modeText else "CCT"
-                if mode == "CCT":
-                    p1Label.setText("Color Temp:")
-                    p1Slider.setSuffix("00K")
-                    p1Slider.setRange(cctMinT, cctMaxT)
-                    p1Slider.setGradientStops(_stopsCCT)
-                    p1Slider.setMinMaxLabels(str(globalCCTMin)+"K", str(globalCCTMax)+"K")
-                    p1Slider.setVisible(True); sceneCombo.setVisible(False)
-                    p2Label.setText("Brightness:")
-                    p2Slider.setSuffix("%")
-                    p2Slider.setGradientStops(_stopsBri); p2Slider.setMinMaxLabels("0","100")
-                    p2Slider.setVisible(True)
-                    p3Label.setText(""); p3Slider.setVisible(False)
-                elif mode == "HSI":
-                    p1Label.setText("Hue:")
-                    p1Slider.setSuffix("\u00B0")
-                    p1Slider.setRange(0, 360)
-                    p1Slider.setGradientStops(_stopsHue)
-                    p1Slider.setMinMaxLabels("0\u00B0", "360\u00B0")
-                    p1Slider.setVisible(True); sceneCombo.setVisible(False)
-                    p2Label.setText("Saturation:")
-                    p2Slider.setSuffix("%")
-                    p2Slider.setGradientStops(_stopsSat); p2Slider.setMinMaxLabels("0","100")
-                    p2Slider.setVisible(True)
-                    p3Label.setText("Brightness:")
-                    p3Slider.setSuffix("%")
-                    p3Slider.setGradientStops(_stopsBri); p3Slider.setMinMaxLabels("0","100")
-                    p3Slider.setVisible(True)
-                elif mode == "SCENE":
-                    p1Label.setText("Scene:")
-                    p1Slider.setVisible(False); sceneCombo.setVisible(True)
-                    p2Label.setText("Brightness:")
-                    p2Slider.setSuffix("%")
-                    p2Slider.setGradientStops(_stopsBri); p2Slider.setMinMaxLabels("0","100")
-                    p2Slider.setVisible(True)
-                    p3Label.setText(""); p3Slider.setVisible(False)
-                _updatePreview()
-
-            def _updatePreview():
-                mode = modeCombo.currentText().upper()
-                if mode == "CCT":
-                    c = _colorForCCT(p1Slider.value(), p2Slider.value())
-                elif mode == "HSI":
-                    c = _colorForHSI(p1Slider.value(), p2Slider.value(), p3Slider.value())
-                elif mode == "SCENE":
-                    c = QColor(145, 0, 255)
-                else:
-                    c = QColor(60, 60, 60)
-                colorPreview.setStyleSheet("background-color: " + c.name() + "; border-radius: 4px;")
-
-            def _readEditor():
-                """Read editor controls into an entry dict."""
-                mode = modeCombo.currentText()
-                e = {"target": targetCombo.currentData() or "-1", "mode": mode}
-                if mode == "CCT":
-                    e["temp"] = p1Slider.value(); e["bri"] = p2Slider.value()
-                elif mode == "HSI":
-                    e["hue"] = p1Slider.value(); e["sat"] = p2Slider.value(); e["bri"] = p3Slider.value()
-                elif mode == "Scene":
-                    e["scene"] = sceneCombo.currentIndex() + 1; e["bri"] = p2Slider.value()
-                return e
-
-            def _loadEditor(entry):
-                """Load an entry dict into editor controls."""
-                # Target
-                val = str(entry.get("target", "-1"))
-                for i in range(targetCombo.count()):
-                    if targetCombo.itemData(i) == val or str(targetCombo.itemData(i)).upper() == val.upper():
-                        targetCombo.setCurrentIndex(i); break
-
-                mode = entry.get("mode", "CCT")
-                modeCombo.blockSignals(True)
-                mIdx = {"CCT": 0, "HSI": 1, "Scene": 2}.get(mode, 0)
-                modeCombo.setCurrentIndex(mIdx)
-                modeCombo.blockSignals(False)
-                _onModeChanged(mode)
-
-                if mode == "CCT":
-                    p1Slider.setValue(entry.get("temp", 56))
-                    p2Slider.setValue(entry.get("bri", 100))
-                elif mode == "HSI":
-                    p1Slider.setValue(entry.get("hue", 240))
-                    p2Slider.setValue(entry.get("sat", 100))
-                    p3Slider.setValue(entry.get("bri", 100))
-                elif mode == "Scene":
-                    sceneCombo.setCurrentIndex(max(0, entry.get("scene", 1) - 1))
-                    p2Slider.setValue(entry.get("bri", 100))
-                _updatePreview()
-
-            def _setTableRow(row, entry):
-                mode = entry.get("mode", "CCT")
-                table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
-                table.item(row, 0).setTextAlignment(QtC.AlignCenter)
-                tgtItem = QTableWidgetItem(_targetLabel(entry.get("target", "-1")))
-                tgtItem.setTextAlignment(QtC.AlignCenter)
-                table.setItem(row, 1, tgtItem)
-                mItem = QTableWidgetItem(mode)
-                mItem.setTextAlignment(QtC.AlignCenter)
-                table.setItem(row, 2, mItem)
-
-                if mode == "CCT":
-                    p1 = str(entry.get("temp", 56) * 100) + "K"
-                    p2 = str(entry.get("bri", 100)) + "%"; p3 = ""
-                    c = _colorForCCT(entry.get("temp", 56), entry.get("bri", 100))
-                elif mode == "HSI":
-                    p1 = str(entry.get("hue", 0)) + "\u00B0"
-                    p2 = str(entry.get("sat", 100)) + "%"
-                    p3 = str(entry.get("bri", 100)) + "%"
-                    c = _colorForHSI(entry.get("hue", 0), entry.get("sat", 100), entry.get("bri", 100))
-                elif mode == "Scene":
-                    p1 = "Scene " + str(entry.get("scene", 1))
-                    p2 = str(entry.get("bri", 100)) + "%"; p3 = ""
-                    c = QColor(145, 0, 255, 120)
-                else:
-                    p1 = p2 = p3 = ""; c = QColor(60, 60, 60)
-
-                table.setItem(row, 3, QTableWidgetItem(p1))
-                table.setItem(row, 4, QTableWidgetItem(p2))
-                table.setItem(row, 5, QTableWidgetItem(p3))
-                if c:
-                    brush = QBrush(c)
-                    mItem.setBackground(brush)
-                    lum = c.red() * 0.299 + c.green() * 0.587 + c.blue() * 0.114
-                    mItem.setForeground(QBrush(QColor(0,0,0) if lum > 128 else QColor(255,255,255)))
-
-            def _populateTable():
-                table.setRowCount(len(entries))
-                for i, e in enumerate(entries):
-                    _setTableRow(i, e)
-                _updateTargetGuardrails()
-
-            def _updateTargetGuardrails():
-                """Disable 'All Lights' when multiple entries exist,
-                and disable targets already used by other entries."""
-                multi = len(entries) > 1
-                r = selectedRow[0]
-                currentTarget = entries[r]["target"] if 0 <= r < len(entries) else None
-                usedTargets = set()
-                for i, e in enumerate(entries):
-                    if i != r:
-                        usedTargets.add(str(e.get("target", "-1")))
-                model = targetCombo.model()
-                for i in range(targetCombo.count()):
-                    item = model.item(i)
-                    if not item:
-                        continue
-                    val = targetCombo.itemData(i)
-                    if i == 0:  # "All Lights (Global)"
-                        item.setEnabled(not multi)
-                        if multi and targetCombo.currentIndex() == 0 and targetCombo.count() > 1:
-                            targetCombo.setCurrentIndex(1)
-                    elif val in usedTargets:
-                        item.setEnabled(False)
-                    else:
-                        item.setEnabled(True)
-
-            def _onRowSelected():
-                rows = table.selectionModel().selectedRows()
-                if not rows:
-                    selectedRow[0] = -1; return
-                row = rows[0].row()
-                selectedRow[0] = row
-                if row < len(entries):
-                    _loadEditor(entries[row])
-                _updateTargetGuardrails()
-
-            def _apply():
-                r = selectedRow[0]
-                if 0 <= r < len(entries):
-                    entries[r] = _readEditor()
-                    _setTableRow(r, entries[r])
-                _updateTargetGuardrails()
-
-            def _addEntry():
-                entries.append({"target": "-1", "mode": "CCT", "temp": globalCCTMax // 100, "bri": 100})
-                _populateTable()
-                table.selectRow(len(entries) - 1)
-
-            def _dupEntry():
-                r = selectedRow[0]
-                if 0 <= r < len(entries):
-                    import copy as _c
-                    entries.insert(r + 1, _c.deepcopy(entries[r]))
-                    _populateTable()
-                    table.selectRow(r + 1)
-
-            def _delEntry():
-                r = selectedRow[0]
-                if r < 0 or r >= len(entries) or len(entries) <= 1: return
-                entries.pop(r)
-                _populateTable()
-                if entries:
-                    table.selectRow(min(r, len(entries) - 1))
-                selectedRow[0] = -1
-
-            def _moveEntry(d):
-                r = selectedRow[0]
-                if r < 0 or r >= len(entries): return
-                nr = r + d
-                if nr < 0 or nr >= len(entries): return
-                entries[r], entries[nr] = entries[nr], entries[r]
-                _populateTable()
-                table.selectRow(nr)
-
-            def _copyEntry():
-                r = selectedRow[0]
-                if 0 <= r < len(entries):
-                    import copy as _c
-                    clipboard[0] = _c.deepcopy(entries[r])
-                    clipboard[0].pop("target", None)  # copy settings, not target
-                    pasteBtn.setEnabled(True)
-                    pasteBtn.setToolTip("Paste: " + clipboard[0].get("mode", "?"))
-
-            def _pasteEntry():
-                r = selectedRow[0]
-                if clipboard[0] and 0 <= r < len(entries):
-                    import copy as _c
-                    tgt = entries[r]["target"]  # preserve target
-                    entries[r] = _c.deepcopy(clipboard[0])
-                    entries[r]["target"] = tgt
-                    _setTableRow(r, entries[r])
-                    _loadEditor(entries[r])
-
-            # Wire signals
-            modeCombo.currentTextChanged.connect(_onModeChanged)
-            for s in [p1Slider, p2Slider, p3Slider]:
-                s.valueChanged.connect(lambda v: _updatePreview())
-            table.selectionModel().selectionChanged.connect(lambda: _onRowSelected())
-            applyBtn.clicked.connect(_apply)
-            addBtn.clicked.connect(_addEntry)
-            dupBtn.clicked.connect(_dupEntry)
-            delBtn.clicked.connect(_delEntry)
-            upBtn.clicked.connect(lambda: _moveEntry(-1))
-            downBtn.clicked.connect(lambda: _moveEntry(1))
-            copyBtn.clicked.connect(_copyEntry)
-            pasteBtn.clicked.connect(_pasteEntry)
-
-            # Populate target combo
-            for label, val in _buildTargetChoices():
-                targetCombo.addItem(label, val)
-
-            # Load preset data
-            if idx < len(customLightPresets) and idx < len(defaultLightPresets):
-                entries.extend(_presetToEntries(customLightPresets[idx], defaultLightPresets[idx]))
-            else:
-                entries.append({"target": "-1", "mode": "CCT", "temp": globalCCTMax // 100, "bri": 100})
-            _populateTable()
-            if entries:
-                table.selectRow(0)
-
-            # Restore size
-            try:
-                if os.path.exists(geometryPrefsFile):
-                    with open(geometryPrefsFile, "r", encoding="utf-8") as f:
-                        geo = json.load(f)
-                    if "presetEditorW" in geo and "presetEditorH" in geo:
-                        dlg.resize(geo["presetEditorW"], geo["presetEditorH"])
-            except Exception:
-                pass
-
-            result_code = dlg.exec()
-
-            # Save size
-            try:
-                geo = {}
-                if os.path.exists(geometryPrefsFile):
-                    with open(geometryPrefsFile, "r", encoding="utf-8") as f:
-                        geo = json.load(f)
-                geo["presetEditorW"] = dlg.width()
-                geo["presetEditorH"] = dlg.height()
-                with open(geometryPrefsFile, "w", encoding="utf-8") as f:
-                    json.dump(geo, f)
-            except Exception:
-                pass
-
-            if result_code == 1:  # Accepted
-                # Apply any pending editor changes
-                r = selectedRow[0]
-                if 0 <= r < len(entries):
-                    entries[r] = _readEditor()
-
-                presetData = _entriesToPreset()
-                if not presetData:
-                    return
-
-                customLightPresets[idx] = presetData
-                newName = nameField.text().strip()[:20]
-                if newName:
-                    presetNames[idx] = newName
-                else:
-                    presetNames.pop(idx, None)
-
-                self.refreshPresetButtonDisplay(idx)
-                self._savePresetsQuick()
-                isSnapshot = any(e[0] != -1 for e in presetData)
-                printDebugString("Preset " + str(idx + 1) + " edited via Preset Editor (" +
-                    ("snapshot, " + str(len(presetData)) + " entries" if isSnapshot else "global") + ")")
-
-        def _addAndSavePreset(self):
-            """Add a new preset slot and immediately open the save dialog for it."""
-            global numOfPresets, defaultLightPresets, customLightPresets
-            numOfPresets += 1
-            defaultLightPresets.append(getDefaultPreset(numOfPresets - 1))
-            customLightPresets.append(getDefaultPreset(numOfPresets - 1))
-            self.createPresetButtons()
-            self.saveCustomPresetDialog(numOfPresets - 1)
-
-        def _updatePresetTooltip(self, idx):
-            """Generate a human-readable tooltip for a preset."""
-            if idx >= len(customLightPresets) or idx >= len(defaultLightPresets):
-                return
-            if customLightPresets[idx] == defaultLightPresets[idx]:
-                self.presetButtons[idx].setToolTip("Empty preset\nLeft-click: recall | Right-click: options | Middle-click: rename")
-                return
-            lines = []
-            name = presetNames.get(idx, "Preset " + str(idx + 1))
-            lines.append(name)
-            lines.append("---")
-            for entry in customLightPresets[idx]:
-                mac = entry[0]
-                params = entry[1]
-                if mac == -1:
-                    lightLabel = "All Lights"
-                else:
-                    # Try to resolve MAC to a name
-                    lightLabel = str(mac)
-                    for light in availableLights:
-                        if light[0].address == mac:
-                            lightLabel = light[2] if light[2] else light[0].name
-                            break
-                if len(params) >= 3:
-                    mode = params[0]
-                    if mode == 4:  # HSI
-                        lines.append(lightLabel + ": HSI " + str(params[2]) + "\u00B0 S:" + str(params[3]) + "% B:" + str(params[1]) + "%")
-                    elif mode == 5:  # CCT
-                        lines.append(lightLabel + ": CCT " + str(params[2]) + "00K B:" + str(params[1]) + "%")
-                    elif mode == 6:  # ANM/Scene
-                        lines.append(lightLabel + ": Scene " + str(params[2]) + " B:" + str(params[1]) + "%")
-                    else:
-                        lines.append(lightLabel + ": mode=" + str(mode))
-                else:
-                    lines.append(lightLabel + ": " + str(params))
-            lines.append("---")
-            lines.append("Left-click: recall | Right-click: options | Middle-click: rename")
-            self.presetButtons[idx].setToolTip("\n".join(lines))
-
-        def renamePresetDialog(self, numOfPreset):
-            """Prompt the user to set or change a custom name for this preset (middle-click)."""
-            currentName = presetNames.get(numOfPreset, "")
-            newName, ok = QInputDialog.getText(self, "Rename Preset " + str(numOfPreset + 1),
-                                               "Enter a name for preset " + str(numOfPreset + 1) + ":\n(Leave blank to clear the name)",
-                                               text=currentName)
-            if ok:
-                newName = newName.strip()[:20]  # limit to 20 chars
-                if newName:
-                    presetNames[numOfPreset] = newName
-                else:
-                    presetNames.pop(numOfPreset, None)
-
-                # Refresh the button display
-                self.refreshPresetButtonDisplay(numOfPreset)
-                printDebugString("Preset " + str(numOfPreset + 1) + " renamed to: " + (newName if newName else "(cleared)"))
-
-        def refreshPresetButtonDisplay(self, numOfPreset):
-            """Refresh a single preset button's text and style to reflect current state."""
-            if numOfPreset >= len(self.presetButtons):
-                return
-            name = presetNames.get(numOfPreset, "")
-            if numOfPreset < len(customLightPresets) and numOfPreset < len(defaultLightPresets):
-                if customLightPresets[numOfPreset] != defaultLightPresets[numOfPreset]:
-                    if customLightPresets[numOfPreset][0][0] == -1:
-                        self.presetButtons[numOfPreset].markCustom(numOfPreset, presetName=name)
-                    else:
-                        self.presetButtons[numOfPreset].markCustom(numOfPreset, 1, presetName=name)
-                else:
-                    self.presetButtons[numOfPreset].markCustom(numOfPreset, -1, presetName=name)
-            else:
-                self.presetButtons[numOfPreset].markCustom(numOfPreset, -1, presetName=name)
-            self._updatePresetTooltip(numOfPreset)
-
-        # ================================================================
-        # ANIMATION TAB HANDLER METHODS
-        # ================================================================
-
-        def animRefreshList(self):
-            """Refresh the animation list widget from savedAnimations, grouped by mode type."""
-            self.animList.clear()
-
-            def _classifyAnim(anim):
-                """Classify an animation as HSI, CCT, or Mixed based on keyframe modes."""
-                modes = set()
-                for kf in anim.get("keyframes", []):
-                    for lightKey, params in kf.get("lights", {}).items():
-                        modes.add(params.get("mode", "HSI").upper())
-                if modes == {"CCT"}:
-                    return "CCT Only"
-                elif modes == {"HSI"}:
-                    return "HSI Only"
-                elif modes == {"ANM"}:
-                    return "Scene Only"
-                elif len(modes) > 1:
-                    return "Mixed"
-                elif not modes:
-                    return "Mixed"
-                return list(modes)[0] + " Only"
-
-            # Group animations by category
-            groups = {}
-            for name in sorted(savedAnimations.keys()):
-                cat = _classifyAnim(savedAnimations[name])
-                if cat not in groups:
-                    groups[cat] = []
-                groups[cat].append(name)
-
-            # Display order: HSI Only first, then Mixed, then CCT Only
-            groupOrder = ["HSI Only", "Mixed", "CCT Only", "Scene Only"]
-            for g in sorted(groups.keys()):
-                if g not in groupOrder:
-                    groupOrder.append(g)
-
-            for group in groupOrder:
-                if group not in groups:
-                    continue
-                # Add group header (non-selectable)
-                header = QListWidgetItem("━━━ " + group + " ━━━")
-                header.setFlags(Qt.NoItemFlags)  # not selectable
-                headerFont = QFont()
-                headerFont.setBold(True)
-                header.setFont(headerFont)
-                self.animList.addItem(header)
-
-                for name in groups[group]:
-                    desc = savedAnimations[name].get("description", "")
-                    kfCount = len(savedAnimations[name].get("keyframes", []))
-                    label = "  " + name
-                    if desc:
-                        label += "  —  " + desc
-                    label += "  [" + str(kfCount) + " frames]"
-                    item = QListWidgetItem(label)
-                    item.setData(Qt.UserRole, name)
-                    self.animList.addItem(item)
-
-        def animGetSelectedName(self):
-            """Return the name of the currently selected animation, or None."""
-            items = self.animList.selectedItems()
-            if items:
-                return items[0].data(Qt.UserRole)
-            return None
-
-        def animPlay(self):
-            """Play the selected animation."""
-            name = self.animGetSelectedName()
-            if not name:
-                self.animStatusLabel.setText("Select an animation first")
-                return
-
-            loopOverride = self.animLoopCheck.isChecked()
-            speedText = self.animSpeedCombo.currentText().replace("x", "")
-            try:
-                speedMult = float(speedText)
-            except ValueError:
-                speedMult = 1.0
-
-            self.animPlayButton.setEnabled(False)
-            self.animStopButton.setEnabled(True)
-            self.animStatusLabel.setText("Starting: " + name)
-
-            fps = self.animRateSpin.value()
-            briScale = self.animBriSpin.value() / 100.0
-
-            global animParallelWrites, animRevertOnFinish
-            animParallelWrites = self.animParallelCheck.isChecked()
-            animRevertOnFinish = self.animRevertCheck.isChecked()
-            maxLoops = self.animLoopCountSpin.value()
-
-            startAnimation(name, asyncioEventLoop, speedMult, loopOverride, fps=fps, briScale=briScale, maxLoops=maxLoops)
-
-        def animStop(self):
-            """Stop the currently playing animation."""
-            stopAnimation()
-            self.animPlayButton.setEnabled(True)
-            self.animStopButton.setEnabled(False)
-            self.animStatusLabel.setText("Stopped")
-
-        def animNew(self):
-            """Create a new animation from a template."""
-            from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout as QFL, QLabel as QL, QLineEdit as QLE, QComboBox as QCB, QSpinBox as QSB, QCheckBox as QCK
-
-            dlg = QDialog(self)
-            dlg.setWindowTitle("New Animation")
-            dlg.setFixedSize(400, 350)
-            layout = QVBoxLayout(dlg)
-            form = QFL()
-
-            nameField = QLE("My Animation")
-            form.addRow("Name:", nameField)
-
-            templateCombo = QCB()
-            templateCombo.addItems(list(ANIMATION_TEMPLATES.keys()) + ["Empty (Manual)"])
-            form.addRow("Template:", templateCombo)
-
-            lightsField = QLE("*")
-            form.addRow("Lights (e.g. 1;2 or *):", lightsField)
-
-            speedSpin = QSB()
-            speedSpin.setRange(50, 5000)
-            speedSpin.setValue(300)
-            speedSpin.setSuffix(" ms")
-            speedSpin.setButtonSymbols(QSB.NoButtons)
-            form.addRow("Speed / hold per frame:", speedSpin)
-
-            fadeSpin = QSB()
-            fadeSpin.setRange(0, 10000)
-            fadeSpin.setValue(0)
-            fadeSpin.setSuffix(" ms")
-            fadeSpin.setButtonSymbols(QSB.NoButtons)
-            form.addRow("Fade between frames:", fadeSpin)
-
-            loopCheck = QCK("Loop animation")
-            loopCheck.setChecked(True)
-            form.addRow(loopCheck)
-
-            briSpin = QSB()
-            briSpin.setRange(0, 100)
-            briSpin.setValue(100)
-            briSpin.setSuffix("%")
-            briSpin.setButtonSymbols(QSB.NoButtons)
-            form.addRow("Brightness:", briSpin)
-
-            layout.addLayout(form)
-
-            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            buttons.accepted.connect(dlg.accept)
-            buttons.rejected.connect(dlg.reject)
-            layout.addWidget(buttons)
-
-            if dlg.exec() == QDialog.Accepted:
-                name = nameField.text().strip() or "Untitled"
-                templateName = templateCombo.currentText()
-                lightsStr = lightsField.text().strip() or "*"
-                lights = lightsStr.split(";") if lightsStr != "*" else ["*"]
-                hold = speedSpin.value()
-                fade = fadeSpin.value()
-                bri = briSpin.value()
-
-                if templateName == "Empty (Manual)":
-                    anim = {
-                        "name": name,
-                        "description": "Custom animation",
-                        "loop": loopCheck.isChecked(),
-                        "keyframes": [
-                            {"hold_ms": hold, "fade_ms": 0, "lights": {l: {"mode": "HSI", "hue": 0, "sat": 100, "bri": bri} for l in lights}}
-                        ]
-                    }
-                else:
-                    templateFn = ANIMATION_TEMPLATES[templateName]
-                    # Call the template with available parameters
-                    if templateName == "Police Flash":
-                        anim = templateFn(lights=lights, speed_ms=hold)
-                    elif templateName == "Strobe":
-                        anim = templateFn(lights=lights, on_ms=hold, off_ms=hold, brightness=bri)
-                    elif templateName == "Breathe":
-                        anim = templateFn(lights=lights, fade_ms=max(fade, 500), hold_ms=hold, max_bri=bri)
-                    elif templateName == "Color Wash":
-                        anim = templateFn(lights=lights, fade_ms=max(fade, 1000), hold_ms=hold)
-                    elif templateName == "Rainbow Chase":
-                        anim = templateFn(lights=lights, step_ms=hold, fade_ms=fade, brightness=bri)
-                    else:  # Color Cycle and others
-                        anim = templateFn(lights=lights, fade_ms=fade, hold_ms=hold, brightness=bri)
-
-                    anim["loop"] = loopCheck.isChecked()
-
-                anim["name"] = name
-                savedAnimations[name] = anim
-                saveAnimationToFile(anim)
-                self.animRefreshList()
-                printDebugString("Created new animation: " + name)
-
-        def animEdit(self):
-            """Open the visual keyframe editor dialog for the selected animation."""
-            name = self.animGetSelectedName()
-            if not name or name not in savedAnimations:
-                return
-
-            try:
-                from neewerlux_anim_editor import AnimationEditorDialog
-            except ImportError:
-                printDebugString("Could not import neewerlux_anim_editor — falling back to JSON editor")
-                self._animEditJSON(name)
-                return
-
-            anim = savedAnimations[name]
-            dlg = AnimationEditorDialog(self, anim, name, cctRange=(globalCCTMin // 100, globalCCTMax // 100))
-            # Restore saved editor size if available
-            try:
-                if os.path.exists(geometryPrefsFile):
-                    with open(geometryPrefsFile, "r", encoding="utf-8") as f:
-                        geo = json.load(f)
-                    if "animEditorW" in geo and "animEditorH" in geo:
-                        dlg.resize(geo["animEditorW"], geo["animEditorH"])
-            except Exception:
-                pass
-
-            result_code = dlg.exec()
-
-            # Save the editor dialog size for next time (regardless of OK/Cancel)
-            try:
-                if os.path.exists(geometryPrefsFile):
-                    with open(geometryPrefsFile, "r", encoding="utf-8") as f:
-                        geo = json.load(f)
-                else:
-                    geo = {}
-                geo["animEditorW"] = dlg.width()
-                geo["animEditorH"] = dlg.height()
-                with open(geometryPrefsFile, "w", encoding="utf-8") as f:
-                    json.dump(geo, f)
-            except Exception:
-                pass
-
-            # Check result (QDialog.exec() returns 1 for Accepted, 0 for Rejected)
-            if result_code == 1:
-                result = dlg.getResult()
-                newName = result["name"]
-
-                # If name changed, delete old file
-                if newName != name:
-                    deleteAnimationFile(name)
-                    savedAnimations.pop(name, None)
-
-                savedAnimations[newName] = result
-                saveAnimationToFile(result)
-                self.animRefreshList()
-                printDebugString("Saved animation: " + newName)
-
-        def _animEditJSON(self, name):
-            """Fallback JSON-only animation editor."""
-            from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout as QHL, QFormLayout as QFL, \
-                QLabel as QL, QLineEdit as QLE, QSpinBox as QSB, QCheckBox as QCK, QTextEdit as QTE, QPushButton as QPB
-
-            anim = savedAnimations[name]
-
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Edit Animation: " + name)
-            dlg.setFixedSize(550, 480)
-            layout = QVBoxLayout(dlg)
-
-            form = QFL()
-            nameField = QLE(anim.get("name", name))
-            form.addRow("Name:", nameField)
-            descField = QLE(anim.get("description", ""))
-            form.addRow("Description:", descField)
-            loopCheck = QCK("Loop")
-            loopCheck.setChecked(anim.get("loop", True))
-            form.addRow(loopCheck)
-            layout.addLayout(form)
-
-            layout.addWidget(QL("<b>Keyframes (JSON)</b> — edit directly:"))
-            jsonEdit = QTE()
-            from neewerlux_ui import _monoFont
-            jsonEdit.setFont(_monoFont(9))
-            jsonEdit.setPlainText(json.dumps(anim.get("keyframes", []), indent=2))
-            layout.addWidget(jsonEdit)
-
-            errorLabel = QL("")
-            errorLabel.setStyleSheet("color: red;")
-            layout.addWidget(errorLabel)
-
-            buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-            buttons.accepted.connect(dlg.accept)
-            buttons.rejected.connect(dlg.reject)
-            layout.addWidget(buttons)
-
-            if dlg.exec() == QDialog.Accepted:
-                try:
-                    newKeyframes = json.loads(jsonEdit.toPlainText())
-                    if not isinstance(newKeyframes, list):
-                        raise ValueError("Keyframes must be a JSON array")
-                except (json.JSONDecodeError, ValueError) as e:
-                    errDlg = QMessageBox(self)
-                    errDlg.setWindowTitle("JSON Error")
-                    errDlg.setText("Invalid keyframe JSON:\n" + str(e))
-                    errDlg.exec()
-                    return
-
-                newName = nameField.text().strip() or name
-                if newName != name:
-                    deleteAnimationFile(name)
-                    savedAnimations.pop(name, None)
-
-                anim["name"] = newName
-                anim["description"] = descField.text().strip()
-                anim["loop"] = loopCheck.isChecked()
-                anim["keyframes"] = newKeyframes
-
-                savedAnimations[newName] = anim
-                saveAnimationToFile(anim)
-                self.animRefreshList()
-                printDebugString("Saved animation: " + newName)
-
-        def animDelete(self):
-            """Delete the selected animation."""
-            name = self.animGetSelectedName()
-            if not name:
-                return
-
-            confirm = QMessageBox.question(self, "Delete Animation",
-                                           "Delete animation '" + name + "'?",
-                                           QMessageBox.Yes | QMessageBox.No)
-            if confirm == QMessageBox.Yes:
-                if animationRunning and currentAnimationName == name:
-                    stopAnimation()
-                deleteAnimationFile(name)
-                savedAnimations.pop(name, None)
-                self.animRefreshList()
-
-        def animDuplicate(self):
-            """Duplicate the selected animation."""
-            name = self.animGetSelectedName()
-            if not name or name not in savedAnimations:
-                return
-            import copy
-            newAnim = copy.deepcopy(savedAnimations[name])
-            newName = name + " (copy)"
-            counter = 2
-            while newName in savedAnimations:
-                newName = name + " (copy " + str(counter) + ")"
-                counter += 1
-            newAnim["name"] = newName
-            savedAnimations[newName] = newAnim
-            saveAnimationToFile(newAnim)
-            self.animRefreshList()
-
-        def animExport(self):
-            """Export the selected animation to a JSON file (copies path to clipboard)."""
-            name = self.animGetSelectedName()
-            if not name or name not in savedAnimations:
-                return
-            self.animStatusLabel.setText("Animation files are in:\n" + animationsDir)
-
-        def animImport(self):
-            """Reload all animations from disk (picks up manually added JSON files)."""
-            loadAllAnimations()
-            loadLightAliases()
-            self.animRefreshList()
-            self.animStatusLabel.setText("Reloaded " + str(len(savedAnimations)) + " animation(s)")
-
-        def connectMe(self):
-            self.turnOffButton.clicked.connect(self.turnLightOff)
-            self.turnOnButton.clicked.connect(self.turnLightOn)
-
-            self.scanCommandButton.clicked.connect(self.startSelfSearch)
-            self.tryConnectButton.clicked.connect(self.startConnect)
-            self.selectAllButton.clicked.connect(self.lightTable.selectAll)
-
-            self.ColorModeTabWidget.currentChanged.connect(self.tabChanged)
-            self.lightTable.itemSelectionChanged.connect(self.selectionChanged)
-
-            # Allow clicking on the headers for sorting purposes
-            horizHeaders = self.lightTable.horizontalHeader()
-            horizHeaders.setSectionsClickable(True)
-            horizHeaders.sectionClicked.connect(self.sortByHeader)
-
-            # PRESET PAGINATION NAVIGATION
-            # ANIMATION TAB CONNECTIONS
-            self.animPlayButton.clicked.connect(self.animPlay)
-            self.animStopButton.clicked.connect(self.animStop)
-            self.animNewButton.clicked.connect(self.animNew)
-            self.animEditButton.clicked.connect(self.animEdit)
-            self.animDeleteButton.clicked.connect(self.animDelete)
-            self.animDuplicateButton.clicked.connect(self.animDuplicate)
-            self.animExportButton.clicked.connect(self.animExport)
-            self.animImportButton.clicked.connect(self.animImport)
-
-            self.Slider_CCT_Hue.valueChanged.connect(lambda: self.computeValueCCT(1))
-            self.Slider_CCT_Bright.valueChanged.connect(lambda: self.computeValueCCT(2))
-
-            self.Slider_HSI_1_H.valueChanged.connect(lambda: self.computeValueHSI(1))
-            self.Slider_HSI_2_S.valueChanged.connect(lambda: self.computeValueHSI(2))
-            self.Slider_HSI_3_L.valueChanged.connect(lambda: self.computeValueHSI(3))
-
-            self.Slider_ANM_Brightness.valueChanged.connect(lambda: self.computeValueANM(0))
-            self.Button_1_police_A.clicked.connect(lambda: self.computeValueANM(1))
-            self.Button_1_police_B.clicked.connect(lambda: self.computeValueANM(2))
-            self.Button_1_police_C.clicked.connect(lambda: self.computeValueANM(3))
-            self.Button_2_party_A.clicked.connect(lambda: self.computeValueANM(4))
-            self.Button_2_party_B.clicked.connect(lambda: self.computeValueANM(5))
-            self.Button_2_party_C.clicked.connect(lambda: self.computeValueANM(6))
-            self.Button_3_lightning_A.clicked.connect(lambda: self.computeValueANM(7))
-            self.Button_3_lightning_B.clicked.connect(lambda: self.computeValueANM(8))
-            self.Button_3_lightning_C.clicked.connect(lambda: self.computeValueANM(9))
-
-            # CHECKS TO SEE IF SPECIFIC FIELDS (and the save button) SHOULD BE ENABLED OR DISABLED
-            self.customName.clicked.connect(self.checkLightPrefsEnables)
-            self.colorTempRange.clicked.connect(self.checkLightPrefsEnables)
-            self.saveLightPrefsButton.clicked.connect(self.checkLightPrefs)
-
-            self.resetGlobalPrefsButton.clicked.connect(lambda: self.setupGlobalLightPrefsTab(True))
-            self.saveGlobalPrefsButton.clicked.connect(self.saveGlobalPrefs)
-            self.applyButton.clicked.connect(self.manualApply)
-            def _onLivePreviewToggled(checked):
-                global livePreview
-                livePreview = checked
-                self.applyButton.setVisible(not checked)
-            self.livePreview_check.toggled.connect(_onLivePreviewToggled)
-
-            # THEME TOGGLE
-            self.themeToggleBtn.clicked.connect(self.toggleTheme)
-
-            # HTTP SERVER TOGGLE
-            self.httpToggleBtn.clicked.connect(self.toggleHTTPServer)
-            self.httpOpenWebUIBtn.clicked.connect(self.openWebUI)
-
-            # SHORTCUT KEYS - MAKE THEM HERE, SET THEIR ASSIGNMENTS BELOW WITH self.setupShortcutKeys()
-            # IN CASE WE NEED TO CHANGE THEM AFTER CHANGING PREFERENCES
-            self.SC_turnOffButton = QShortcut(self)
-            self.SC_turnOnButton = QShortcut(self)
-            self.SC_scanCommandButton = QShortcut(self)
-            self.SC_tryConnectButton = QShortcut(self)
-            self.SC_Tab_CCT = QShortcut(self)
-            self.SC_Tab_HSI = QShortcut(self)
-            self.SC_Tab_SCENE = QShortcut(self)
-            self.SC_Tab_PREFS = QShortcut(self)
-
-            # DECREASE/INCREASE BRIGHTNESS REGARDLESS OF WHICH TAB WE'RE ON
-            self.SC_Dec_Bri_Small = QShortcut(self)
-            self.SC_Inc_Bri_Small = QShortcut(self)
-            self.SC_Dec_Bri_Large = QShortcut(self)
-            self.SC_Inc_Bri_Large = QShortcut(self)
-
-            # THE SMALL INCREMENTS *DO* NEED A CUSTOM FUNCTION, BUT ONLY IF WE CHANGE THE
-            # SHORTCUT ASSIGNMENT TO SOMETHING OTHER THAN THE NORMAL NUMBERS
-            # THE LARGE INCREMENTS DON'T NEED A CUSTOM FUNCTION
-            self.SC_Dec_1_Small = QShortcut(self)
-            self.SC_Inc_1_Small = QShortcut(self)
-            self.SC_Dec_2_Small = QShortcut(self)
-            self.SC_Inc_2_Small = QShortcut(self)
-            self.SC_Dec_3_Small = QShortcut(self)
-            self.SC_Inc_3_Small = QShortcut(self)
-            self.SC_Dec_1_Large = QShortcut(self)
-            self.SC_Inc_1_Large = QShortcut(self)
-            self.SC_Dec_2_Large = QShortcut(self)
-            self.SC_Inc_2_Large = QShortcut(self)
-            self.SC_Dec_3_Large = QShortcut(self)
-            self.SC_Inc_3_Large = QShortcut(self)
-
-            self.setupShortcutKeys() # set up the shortcut keys for the first time
-
-            # CONNECT THE KEYS TO THEIR FUNCTIONS
-            self.SC_turnOffButton.activated.connect(self.turnLightOff)
-            self.SC_turnOnButton.activated.connect(self.turnLightOn)
-            self.SC_scanCommandButton.activated.connect(self.startSelfSearch)
-            self.SC_tryConnectButton.activated.connect(self.startConnect)
-            self.SC_Tab_CCT.activated.connect(lambda: self.switchToTab(0))
-            self.SC_Tab_HSI.activated.connect(lambda: self.switchToTab(1))
-            self.SC_Tab_SCENE.activated.connect(lambda: self.switchToTab(2))
-            self.SC_Tab_PREFS.activated.connect(lambda: self.switchToTab(4))
-
-            # DECREASE/INCREASE BRIGHTNESS REGARDLESS OF WHICH TAB WE'RE ON
-            self.SC_Dec_Bri_Small.activated.connect(lambda: self.adjustLightParameter(0, -1))
-            self.SC_Inc_Bri_Small.activated.connect(lambda: self.adjustLightParameter(0, 1))
-            self.SC_Dec_Bri_Large.activated.connect(lambda: self.adjustLightParameter(0, -5))
-            self.SC_Inc_Bri_Large.activated.connect(lambda: self.adjustLightParameter(0, 5))
-
-            # THE SMALL INCREMENTS DO NEED A SPECIAL FUNCTION-
-            # (see above) - BASICALLY, IF THEY'RE JUST ASSIGNED THE DEFAULT NUMPAD/NUMBER VALUES
-            # THESE FUNCTIONS DON'T TRIGGER (THE SAME FUNCTIONS ARE HANDLED BY numberShortcuts(n))
-            # BUT IF THEY ARE CUSTOM, *THEN* THESE TRIGGER INSTEAD, AND THIS FUNCTION ^^^^ JUST DOES
-            # SCENE SELECTIONS IN SCENE MODE
-            self.SC_Dec_1_Small.activated.connect(lambda: self.adjustLightParameter(1, -1))
-            self.SC_Inc_1_Small.activated.connect(lambda: self.adjustLightParameter(1, 1))
-            self.SC_Dec_2_Small.activated.connect(lambda: self.adjustLightParameter(2, -1))
-            self.SC_Inc_2_Small.activated.connect(lambda: self.adjustLightParameter(2, 1))
-            self.SC_Dec_3_Small.activated.connect(lambda: self.adjustLightParameter(3, -1))
-            self.SC_Inc_3_Small.activated.connect(lambda: self.adjustLightParameter(3, 1))
-
-            # THE LARGE INCREMENTS DON'T NEED A CUSTOM FUNCTION
-            self.SC_Dec_1_Large.activated.connect(lambda: self.adjustLightParameter(1, -5))
-            self.SC_Inc_1_Large.activated.connect(lambda: self.adjustLightParameter(1, 5))
-            self.SC_Dec_2_Large.activated.connect(lambda: self.adjustLightParameter(2, -5))
-            self.SC_Inc_2_Large.activated.connect(lambda: self.adjustLightParameter(2, 5))
-            self.SC_Dec_3_Large.activated.connect(lambda: self.adjustLightParameter(3, -5))
-            self.SC_Inc_3_Large.activated.connect(lambda: self.adjustLightParameter(3, 5))
-
-            # THE NUMPAD SHORTCUTS ARE SET UP REGARDLESS OF WHAT THE CUSTOM INC/DEC SHORTCUTS ARE
-            self.SC_Num1 = QShortcut(QKeySequence("1"), self)
-            self.SC_Num1.activated.connect(lambda: self.numberShortcuts(1))
-            self.SC_Num2 = QShortcut(QKeySequence("2"), self)
-            self.SC_Num2.activated.connect(lambda: self.numberShortcuts(2))
-            self.SC_Num3 = QShortcut(QKeySequence("3"), self)
-            self.SC_Num3.activated.connect(lambda: self.numberShortcuts(3))
-            self.SC_Num4 = QShortcut(QKeySequence("4"), self)
-            self.SC_Num4.activated.connect(lambda: self.numberShortcuts(4))
-            self.SC_Num5 = QShortcut(QKeySequence("5"), self)
-            self.SC_Num5.activated.connect(lambda: self.numberShortcuts(5))
-            self.SC_Num6 = QShortcut(QKeySequence("6"), self)
-            self.SC_Num6.activated.connect(lambda: self.numberShortcuts(6))
-            self.SC_Num7 = QShortcut(QKeySequence("7"), self)
-            self.SC_Num7.activated.connect(lambda: self.numberShortcuts(7))
-            self.SC_Num8 = QShortcut(QKeySequence("8"), self)
-            self.SC_Num8.activated.connect(lambda: self.numberShortcuts(8))
-            self.SC_Num9 = QShortcut(QKeySequence("9"), self)
-            self.SC_Num9.activated.connect(lambda: self.numberShortcuts(9))
-
-        def sortByHeader(self, theHeader):
-            global availableLights
-            global lastSortingField
-
-            if theHeader < 2: # if we didn't click on the "Linked" or "Status" headers, start processing the sort
-                sortingList = [] # a copy of the availableLights array
-                checkForCustomNames = False # whether or not to ask to sort by custom names (if there aren't any custom names, then don't allow)
-
-                for a in range(len(availableLights)): # copy the entire availableLights array into a temporary array to process it
-                    if theHeader == 0 and availableLights[a][2] != "": # if the current light has a custom name (and we clicked on Name)
-                        checkForCustomNames = True # then we need to ask what kind of sorting when we sort
-
-                    sortingList.append([availableLights[a][0], availableLights[a][1], availableLights[a][2], availableLights[a][3], \
-                                        availableLights[a][4], availableLights[a][5], availableLights[a][6], availableLights[a][7], \
-                                        availableLights[a][0].name, availableLights[a][0].address, _get_light_rssi(availableLights[a])])
-            else: # we clicked on the "Linked" or "Status" headers, which do not allow sorting
-                sortingField = -1
-
-            if theHeader == 0:
-                sortDlg = QMessageBox(self)
-                sortDlg.setIcon(QMessageBox.Question)
-                sortDlg.setWindowTitle("Sort by...")
-                sortDlg.setText("Which do you want to sort by?")
-                   
-                sortDlg.addButton(" RSSI (Signal Level) ", QMessageBox.ButtonRole.AcceptRole)
-                sortDlg.addButton(" Type of Light ", QMessageBox.ButtonRole.AcceptRole)
-
-                if checkForCustomNames == True: # if we have custom names available, then add that as an option
-                    sortDlg.addButton("Custom Name", QMessageBox.ButtonRole.AcceptRole)    
-                    
-                sortDlg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-                sortDlg.setIcon(QMessageBox.Warning)
-                clickedButton = sortDlg.exec()
-
-                if clickedButton == 0:
-                    sortingField = 10 # sort by RSSI
-                elif clickedButton == 1:
-                    sortingField = 8 # sort by type of light
-                elif clickedButton == 2:
-                    if checkForCustomNames == True: # if the option was available for custom names, this is "custom name"
-                        sortingField = 2 
-                    else: # if the option wasn't available, then this is "cancel"
-                        sortingField = -1 # cancel out of sorting - write this!
-                elif clickedButton == 3: # this option is only available if custom names is accessible - if so, this is "cancel"
-                        sortingField = -1 # cancel out of sorting - write this!
-            elif theHeader == 1: # sort by MAC Address/GUID
-                sortingField = 9
-
-            if sortingField != -1: # we want to sort
-                self.lightTable.horizontalHeader().setSortIndicatorShown(True) # show the sorting indicator
-
-                if lastSortingField != sortingField: # if we're doing a different kind of sort than the last one
-                    self.lightTable.horizontalHeader().setSortIndicator(theHeader, Qt.SortOrder.AscendingOrder) # force the header to "Ascending" order
-                    if sortingField != 10: # if we're not looking at RSSI
-                        doReverseSort = False # we need an ascending order search
-                    else: # we ARE looking at RSSI
-                        doReverseSort = True # if we're looking at RSSI, then the search order is reversed (as the smaller # is actually the higher value)
-                else: # if it's the same as before, then take the cue from the last order
-                    if self.lightTable.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder:
-                        if sortingField != 10:
-                            doReverseSort = True
-                        else:
-                            doReverseSort = False
-                    elif self.lightTable.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.AscendingOrder:
-                        if sortingField != 10:
-                            doReverseSort = False
-                        else:
-                            doReverseSort = True
-
-                sortedList = sorted(sortingList, key = lambda x: x[sortingField], reverse = doReverseSort) # sort the list
-                availableLights.clear() # clear the list of available lights
-
-                for a in range(len(sortedList)): # rebuild the available lights list from the sorted list
-                    availableLights.append([sortedList[a][0], sortedList[a][1], sortedList[a][2], sortedList[a][3], \
-                                            sortedList[a][4], sortedList[a][5], sortedList[a][6], sortedList[a][7], \
-                                            sortedList[a][8] if len(sortedList[a]) > 8 else 0])
-                                        
-                self.updateLights(False, False) # redraw the table with the new light list (don't reorder by preferred ID)
-                lastSortingField = sortingField # keep track of the last field used for sorting, so we know whether or not to switch to ascending
-            else:
-                self.lightTable.horizontalHeader().setSortIndicatorShown(False) # hide the sorting indicator
-
-        def switchToTab(self, theTab): # SWITCH TO THE REQUESTED TAB **IF IT IS AVAILABLE**
-            if self.ColorModeTabWidget.isTabEnabled(theTab) == True:
-                self.ColorModeTabWidget.setCurrentIndex(theTab)
-
-        def numberShortcuts(self, theNumber):
-            # THE KEYS (IF THERE AREN'T CUSTOM ONES SET UP):
-            # 7 AND 9 ADJUST THE FIRST SLIDER ON A TAB
-            # 4 AND 6 ADJUST THE SECOND SLIDER ON A TAB
-            # 1 AND 3 ADJUST THE THIRD SLIDER ON A TAB
-            # UNLESS WE'RE IN SCENE MODE, THEN THEY JUST SWITCH THE SCENE
-            if theNumber == 1:
-                if self.ColorModeTabWidget.currentIndex() == 2: # if we're on the SCENE tab, then the number keys correspond to an animation
-                    self.computeValueANM(1)
-                else: # if we're not, adjust the slider
-                    if customKeys[16] == "1":
-                        self.adjustLightParameter(3, -1) # decrement slider 3
-            elif theNumber == 2:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(2)
-            elif theNumber == 3:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(3)
-                else:
-                    if customKeys[17] == "3":
-                        self.adjustLightParameter(3, 1) # increment slider 3
-            elif theNumber == 4:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(4)
-                else:
-                    if customKeys[14] == "4":
-                        self.adjustLightParameter(2, -1) # decrement slider 2
-            elif theNumber == 5:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(5)
-            elif theNumber == 6:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(6)
-                else:
-                    if customKeys[15] == "6":
-                        self.adjustLightParameter(2, 1) # increment slider 2
-            elif theNumber == 7:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(7)
-                else:
-                    if customKeys[12] == "7":
-                        self.adjustLightParameter(1, -1) # decrement slider 1
-            elif theNumber == 8:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(8)
-            elif theNumber == 9:
-                if self.ColorModeTabWidget.currentIndex() == 2:
-                    self.computeValueANM(9)
-                else:
-                    if customKeys[13] == "9":
-                        self.adjustLightParameter(1, 1) # increment slider 1
-
-        def adjustLightParameter(self, paramType, delta):
-            """Adjust a parameter on each selected light according to that light's own mode.
-
-            paramType: 0=brightness, 1=temp/hue, 2=brightness/saturation, 3=intensity.
-            Lights whose mode has no such parameter are skipped, so a hue nudge leaves
-            CCT lights alone and a saturation nudge leaves Scene lights alone.
-            """
-            global threadAction, sendValue
-
-            selectedLights = self.selectedLights()
-            if not selectedLights:
-                selectedLights = list(range(len(availableLights)))
-
-            adjusted = []
-            for lightIdx in selectedLights:
-                if lightIdx >= len(availableLights):
-                    continue
-                params = availableLights[lightIdx][3]
-                if not params or not isinstance(params, list) or len(params) < 4:
-                    continue
-
-                mode = params[1]
-                newParams = list(params)
-
-                if mode == 135: # CCT: [120, 135, 2, bri, temp, checksum]
-                    if paramType in (0, 2):
-                        newParams[3] = max(0, min(100, newParams[3] + delta))
-                    elif paramType == 1:
-                        minK, maxK = getEffectiveCCTRange(lightIdx)
-                        newParams[4] = max(minK // 100, min(maxK // 100, newParams[4] + delta))
-                    else:
-                        continue
-                elif mode == 134: # HSI: [120, 134, 4, hueLo, hueHi, sat, bri, checksum]
-                    if paramType in (0, 3):
-                        newParams[6] = max(0, min(100, newParams[6] + delta))
-                    elif paramType == 1:
-                        hue = (newParams[3] | (newParams[4] << 8)) + delta
-                        hue %= 361
-                        newParams[3] = hue & 255
-                        newParams[4] = (hue >> 8) & 255
-                    elif paramType == 2:
-                        newParams[5] = max(0, min(100, newParams[5] + delta))
-                    else:
-                        continue
-                elif mode == 136: # ANM/Scene: [120, 136, 2, bri, scene, checksum]
-                    if paramType == 0:
-                        newParams[3] = max(0, min(100, newParams[3] + delta))
-                    else:
-                        continue
-                else:
-                    continue
-
-                newParams[-1] = calculateChecksum(newParams)
-                availableLights[lightIdx][3] = newParams
-                adjusted.append(lightIdx)
-
-            if not adjusted:
-                return
-
-            self._syncSlidersToLight(adjusted[0])
-
-            if not livePreview:
-                return
-
-            if animationRunning:
-                stopAnimation()
-                try:
-                    if mainWindow is not None:
-                        mainWindow.animPlayButton.setEnabled(True)
-                        mainWindow.animStopButton.setEnabled(False)
-                        mainWindow.animStatusLabel.setText("Stopped")
-                except Exception:
-                    pass
-
-            if threadAction == "":
-                threadAction = "psend|" + "|".join(map(str, adjusted))
-
-        def _syncSlidersToLight(self, lightIdx):
-            """Move the active tab's sliders to match a light's stored values, without re-sending."""
-            if lightIdx < 0 or lightIdx >= len(availableLights):
-                return
-            params = availableLights[lightIdx][3]
-            if not params or not isinstance(params, list):
-                return
-            mode = params[1]
-            tab = self.ColorModeTabWidget.currentIndex()
-
-            if mode == 135 and tab == 0:
-                widgets = (self.Slider_CCT_Bright, self.Slider_CCT_Hue)
-                for w in widgets: w.blockSignals(True)
-                self.Slider_CCT_Bright.setValue(params[3])
-                self.Slider_CCT_Hue.setValue(params[4])
-                self.TFV_CCT_Bright.setText(str(params[3]) + "%")
-                self.TFV_CCT_Hue.setText(str(params[4]) + "00K")
-                for w in widgets: w.blockSignals(False)
-            elif mode == 134 and tab == 1:
-                hue = params[3] | (params[4] << 8)
-                widgets = (self.Slider_HSI_1_H, self.Slider_HSI_2_S, self.Slider_HSI_3_L)
-                for w in widgets: w.blockSignals(True)
-                self.Slider_HSI_1_H.setValue(hue)
-                self.Slider_HSI_2_S.setValue(params[5])
-                self.Slider_HSI_3_L.setValue(params[6])
-                self.TFV_HSI_1_H.setText(str(hue) + "\u00B0")
-                self.TFV_HSI_2_S.setText(str(params[5]) + "%")
-                self.TFV_HSI_3_L.setText(str(params[6]) + "%")
-                for w in widgets: w.blockSignals(False)
-            elif mode == 136 and tab == 2:
-                self.Slider_ANM_Brightness.blockSignals(True)
-                self.Slider_ANM_Brightness.setValue(params[3])
-                self.TFV_ANM_Brightness.setText(str(params[3]) + "%")
-                self.Slider_ANM_Brightness.blockSignals(False)
-
-        def checkLightTab(self, selectedLight = -1):
-            if self.ColorModeTabWidget.currentIndex() == 0: # if we're on the CCT tab, do the check
-                if selectedLight == -1: # if we don't have a light selected
-                    self.setupCCTBounds(globalCCTMin, globalCCTMax)
-                else: # set up the gradient to show the range of color temperatures available
-                    minK, maxK = getEffectiveCCTRange(selectedLight)
-                    self.setupCCTBounds(minK, maxK)
-
-            elif self.ColorModeTabWidget.currentIndex() == 4: # if we're on the Light Preferences tab
-                if selectedLight != -1: # if there is a specific selected light
-                    self.setupLightPrefsTab(selectedLight) # update the Prefs tab with the information for that selected light
-
-        def getCCTTempStops(self, startRange, endRange):
-            """Return gradient stops for the CCT temperature range."""
-            rangeStep = (endRange - startRange) / 4
-            stops = []
-            for i in range(5):
-                rgbValues = convert_K_to_RGB(startRange + (rangeStep * i))
-                stops.append((0.25 * i, QColor(rgbValues[0], rgbValues[1], rgbValues[2])))
-            return stops
-
-        def getHSISatStops(self, hue):
-            """Return gradient stops for saturation bar based on current hue."""
-            newColor = convert_HSI_to_RGB(hue / 360)
-            return [(0, QColor(255, 255, 255)), (1, QColor(newColor[0], newColor[1], newColor[2]))]
-
-        def setupCCTBounds(self, startRange, endRange):
-            self.TFV_CCT_Hue_Min.setText(str(startRange) + "K")
-            self.TFV_CCT_Hue_Max.setText(str(endRange) + "K")
-
-            self.Slider_CCT_Hue.setMinimum(startRange / 100)
-            self.Slider_CCT_Hue.setMaximum(endRange / 100)
-            
-            # Update the gradient bar
-            self.CCT_Temp_Gradient_BG.setStops(self.getCCTTempStops(startRange, endRange))
-
-        def setupLightPrefsTab(self, selectedLight):
-            # SET UP THE CUSTOM NAME TEXT BOX
-            if availableLights[selectedLight][2] == "":
-                self.customName.setChecked(False)
-                self.customNameTF.setEnabled(False)
-                self.customNameTF.setText("") # set the "custom name" to nothing
-            else:
-                self.customName.setChecked(True)
-                self.customNameTF.setEnabled(True)
-                self.customNameTF.setText(availableLights[selectedLight][2]) # set the "custom name" field to the custom name of this light
-
-            # SET UP THE PREFERRED ID SPINBOX
-            prefID = availableLights[selectedLight][8] if len(availableLights[selectedLight]) > 8 else 0
-            self.preferredIDSpin.setValue(prefID)
-
-            # SET UP THE MINIMUM AND MAXIMUM TEXT BOXES
-            defaultRange = getLightSpecs(availableLights[selectedLight][0].name, "temp")
-
-            if availableLights[selectedLight][4] == defaultRange:
-                self.colorTempRange.setChecked(False)
-                self.colorTempRange_Min_TF.setEnabled(False)
-                self.colorTempRange_Max_TF.setEnabled(False)
-
-                self.colorTempRange_Min_TF.setText(str(defaultRange[0]))
-                self.colorTempRange_Max_TF.setText(str(defaultRange[1]))
-            else:
-                self.colorTempRange.setChecked(True)
-                self.colorTempRange_Min_TF.setEnabled(True)
-                self.colorTempRange_Max_TF.setEnabled(True)
-                
-                self.colorTempRange_Min_TF.setText(str(availableLights[selectedLight][4][0]))
-                self.colorTempRange_Max_TF.setText(str(availableLights[selectedLight][4][1]))
-            
-            # IF THE OPTION TO SEND ONLY CCT MODE IS ENABLED, THEN ENABLE THAT CHECKBOX
-            if availableLights[selectedLight][5] == True:
-                self.onlyCCTModeCheck.setChecked(True)
-            else:
-                self.onlyCCTModeCheck.setChecked(False)
-
-            self.checkLightPrefsEnables() # set up which fields on the panel are enabled
-
-        def checkLightPrefsEnables(self): # enable/disable fields when clicking on checkboxes
-            # allow/deny typing in the "custom name" field if the option is clicked
-            if self.customName.isChecked():
-                self.customNameTF.setEnabled(True)
-            else:
-                self.customNameTF.setEnabled(False)
-                self.customNameTF.setText("")
-
-            # allow/deny typing in the "minmum" and "maximum" fields if the option is clicked
-            if self.colorTempRange.isChecked():
-                self.colorTempRange_Min_TF.setEnabled(True)
-                self.colorTempRange_Max_TF.setEnabled(True)
-            else:
-                selectedRows = self.selectedLights() # get the list of currently selected lights
-                defaultSettings = getLightSpecs(availableLights[selectedRows[0]][0].name, "temp")
-
-                self.colorTempRange_Min_TF.setText(str(defaultSettings[0]))
-                self.colorTempRange_Max_TF.setText(str(defaultSettings[1]))
-
-                self.colorTempRange_Min_TF.setEnabled(False)
-                self.colorTempRange_Max_TF.setEnabled(False)
-            
-        def checkLightPrefs(self): # check the new settings and save the custom file
-            selectedRows = self.selectedLights() # get the list of currently selected lights
-
-            # CHECK DEFAULT SETTINGS AGAINST THE CURRENT SETTINGS
-            defaultSettings = getLightSpecs(availableLights[selectedRows[0]][0].name)
-
-            if self.colorTempRange.isChecked():
-                newRange = [testValid("range_min", self.colorTempRange_Min_TF.text(), defaultSettings[1][0], 1000, 5600, True),
-                            testValid("range_max", self.colorTempRange_Max_TF.text(), defaultSettings[1][1], 1000, 10000, True)]
-            else:
-                newRange = defaultSettings[1]
-
-            changedPrefs = 0 # number of how many preferences have changed
-
-            if len(selectedRows) == 1: # if we have 1 selected light - which should never be false, as we can't use Prefs with more than 1
-                if self.customName.isChecked(): # if we're set to allow a custom name
-                    if availableLights[selectedRows[0]][2] != self.customNameTF.text():
-                        availableLights[selectedRows[0]][2] = self.customNameTF.text() # set this light's custom name to the text box
-                        changedPrefs += 1 # add one to the preferences changed counter
-                else: # we're not supposed to set a custom name (so delete it)
-                    if availableLights[selectedRows[0]][2] != "":
-                        availableLights[selectedRows[0]][2] = "" # clear the old custom name if we've turned this off
-                        changedPrefs += 1 # add one to the preferences changed counter
-
-                # IF A CUSTOM NAME IS SET UP FOR THIS LIGHT, THEN CHANGE THE TABLE TO REFLECT THAT
-                if availableLights[selectedRows[0]][2] != "":
-                    self.setTheTable([availableLights[selectedRows[0]][2] + " (" + availableLights[selectedRows[0]][0].name + ")" "\n  [ʀssɪ: " + _get_light_rssi(availableLights[selectedRows[0]]) + " dBm]",
-                                    "", "", ""], selectedRows[0])
-                else: # if there is no custom name, then reset the table to show that
-                    self.setTheTable([availableLights[selectedRows[0]][0].name + "\n  [ʀssɪ: " + _get_light_rssi(availableLights[selectedRows[0]]) + " dBm]",
-                                    "", "", ""], selectedRows[0])
-
-                if self.colorTempRange.isChecked(): # if we've asked to save a custom temperature range for this light
-                    if availableLights[selectedRows[0]][4] != newRange: # change the range in the available lights table if they are different
-                        if defaultSettings[1] != newRange:
-                            availableLights[selectedRows[0]][4][0] = newRange[0]
-                            availableLights[selectedRows[0]][4][1] = newRange[1]
-                            changedPrefs += 1 # add one to the preferences changed counter
-                        else: # the ranges are the same as the default range, so we're not modifying those values
-                            printDebugString("You asked for a custom range of color temperatures, but didn't specify a custom range, so not changing!")
-                else: # if the custom temp checkbox is not clicked
-                    if availableLights[selectedRows[0]][4] != defaultSettings[1]: # and the settings are not the defaults
-                        availableLights[selectedRows[0]][4] = defaultSettings[1] # restore them to the defaults
-                        changedPrefs += 1 # add one to the preferences changed counter
-
-                if availableLights[selectedRows[0]][5] != self.onlyCCTModeCheck.isChecked():
-                    availableLights[selectedRows[0]][5] = self.onlyCCTModeCheck.isChecked() # if the option to send BRI and HUE separately is checked, then turn that on
-                    changedPrefs += 1
-
-                # PREFERRED ID FOR LIGHT ALIASING
-                newPrefID = self.preferredIDSpin.value()
-                oldPrefID = availableLights[selectedRows[0]][8] if len(availableLights[selectedRows[0]]) > 8 else 0
-                if newPrefID != oldPrefID:
-                    if len(availableLights[selectedRows[0]]) > 8:
-                        availableLights[selectedRows[0]][8] = newPrefID
-                    else:
-                        availableLights[selectedRows[0]].append(newPrefID)
-                    changedPrefs += 1
-
-                if changedPrefs > 0:
-                    # IF ALL THE SETTINGS ARE THE SAME AS THE DEFAULT, THEN DELETE THE PREFS FILE (IF IT EXISTS)
-                    currentPrefID = availableLights[selectedRows[0]][8] if len(availableLights[selectedRows[0]]) > 8 else 0
-                    if defaultSettings[0] == self.customNameTF.text() and \
-                    defaultSettings[1] == newRange and \
-                    defaultSettings[2] == self.onlyCCTModeCheck.isChecked() and \
-                    currentPrefID == 0:
-                        printDebugString("All the options that are currently set are the defaults for this light, so the preferences file will be deleted.")
-                        saveLightPrefs(selectedRows[0], True) # delete the old prefs file
-                    else:
-                        saveLightPrefs(selectedRows[0]) # save the light settings to a special file
-
-                    loadLightAliases() # refresh alias table so names/IDs take effect immediately
-                    self.updateLights(False) # reorder table to reflect any preferred ID changes
-                else:                    
-                    printDebugString("You don't have any new preferences to save, so we aren't saving any!")
-
-        def setupGlobalLightPrefsTab(self, setDefault=False):
-            if setDefault == False:
-                self.findLightsOnStartup_check.setChecked(findLightsOnStartup)
-                self.autoConnectToLights_check.setChecked(autoConnectToLights)
-                self.printDebug_check.setChecked(printDebug)
-                self.rememberLightsOnExit_check.setChecked(rememberLightsOnExit)
-                self.rememberPresetsOnExit_check.setChecked(rememberPresetsOnExit)
-                self.livePreview_check.setChecked(livePreview)
-                self.autoReconnect_check.setChecked(autoReconnectOnDisconnect)
-                self.hideConsoleOnLaunch_check.setChecked(hideConsoleOnLaunch)
-                if _isFrozenExe:
-                    self.hideConsoleOnLaunch_check.setChecked(False)
-                    self.hideConsoleOnLaunch_check.setVisible(False)
-                self.minimizeToTrayOnClose_check.setChecked(minimizeToTrayOnClose)
-                self.httpAutoStart_check.setChecked(httpAutoStart)
-                self.httpPortField.setText(str(httpPort))
-                self.cctFallbackCombo.setCurrentIndex(0 if cctFallbackMode == "convert" else 1)
-                self.enableLogTab_check.setChecked(enableLogTab)
-                self.logToFile_check.setChecked(logToFile)
-                self.globalCCTMinSpin.setValue(globalCCTMin)
-                self.globalCCTMaxSpin.setValue(globalCCTMax)
-                self.maxNumOfAttempts_field.setText(str(maxNumOfAttempts))
-                self.acceptable_HTTP_IPs_field.setText("\n".join(acceptable_HTTP_IPs))
-                self.whiteListedMACs_field.setText("\n".join(whiteListedMACs))
-                self.SC_turnOffButton_field.setKeySequence(customKeys[0])
-                self.SC_turnOnButton_field.setKeySequence(customKeys[1])
-                self.SC_scanCommandButton_field.setKeySequence(customKeys[2])
-                self.SC_tryConnectButton_field.setKeySequence(customKeys[3])
-                self.SC_Tab_CCT_field.setKeySequence(customKeys[4])
-                self.SC_Tab_HSI_field.setKeySequence(customKeys[5])
-                self.SC_Tab_SCENE_field.setKeySequence(customKeys[6])
-                self.SC_Tab_PREFS_field.setKeySequence(customKeys[7])
-                self.SC_Dec_Bri_Small_field.setKeySequence(customKeys[8])
-                self.SC_Inc_Bri_Small_field.setKeySequence(customKeys[9])
-                self.SC_Dec_Bri_Large_field.setKeySequence(customKeys[10])
-                self.SC_Inc_Bri_Large_field.setKeySequence(customKeys[11])
-                self.SC_Dec_1_Small_field.setKeySequence(customKeys[12])
-                self.SC_Inc_1_Small_field.setKeySequence(customKeys[13])
-                self.SC_Dec_2_Small_field.setKeySequence(customKeys[14])
-                self.SC_Inc_2_Small_field.setKeySequence(customKeys[15])
-                self.SC_Dec_3_Small_field.setKeySequence(customKeys[16])
-                self.SC_Inc_3_Small_field.setKeySequence(customKeys[17])
-                self.SC_Dec_1_Large_field.setKeySequence(customKeys[18])
-                self.SC_Inc_1_Large_field.setKeySequence(customKeys[19])
-                self.SC_Dec_2_Large_field.setKeySequence(customKeys[20])
-                self.SC_Inc_2_Large_field.setKeySequence(customKeys[21])
-                self.SC_Dec_3_Large_field.setKeySequence(customKeys[22])
-                self.SC_Inc_3_Large_field.setKeySequence(customKeys[23])
-            else: # if you clicked the RESET button, reset all preference values to their defaults
-                self.findLightsOnStartup_check.setChecked(True)
-                self.autoConnectToLights_check.setChecked(True)
-                self.printDebug_check.setChecked(True)
-                self.rememberLightsOnExit_check.setChecked(False)
-                self.rememberPresetsOnExit_check.setChecked(True)
-                self.livePreview_check.setChecked(True)
-                self.autoReconnect_check.setChecked(True)
-                self.hideConsoleOnLaunch_check.setChecked(False)
-                self.minimizeToTrayOnClose_check.setChecked(True)
-                self.httpAutoStart_check.setChecked(False)
-                self.httpPortField.setText("8080")
-                self.cctFallbackCombo.setCurrentIndex(0)  # Convert
-                self.enableLogTab_check.setChecked(True)
-                self.logToFile_check.setChecked(False)
-                self.globalCCTMinSpin.setValue(3200)
-                self.globalCCTMaxSpin.setValue(5600)
-                self.maxNumOfAttempts_field.setText("6")
-                self.acceptable_HTTP_IPs_field.setText("\n".join(["127.0.0.1", "192.168.", "10."]))
-                self.whiteListedMACs_field.setText("")
-                self.SC_turnOffButton_field.setKeySequence("Ctrl+PgDown")
-                self.SC_turnOnButton_field.setKeySequence("Ctrl+PgUp")
-                self.SC_scanCommandButton_field.setKeySequence("Ctrl+Shift+S")
-                self.SC_tryConnectButton_field.setKeySequence("Ctrl+Shift+C")
-                self.SC_Tab_CCT_field.setKeySequence("Alt+1")
-                self.SC_Tab_HSI_field.setKeySequence("Alt+2")
-                self.SC_Tab_SCENE_field.setKeySequence("Alt+3")
-                self.SC_Tab_PREFS_field.setKeySequence("Alt+4")
-                self.SC_Dec_Bri_Small_field.setKeySequence("/")
-                self.SC_Inc_Bri_Small_field.setKeySequence("*")
-                self.SC_Dec_Bri_Large_field.setKeySequence("Ctrl+/")
-                self.SC_Inc_Bri_Large_field.setKeySequence("Ctrl+*")
-                self.SC_Dec_1_Small_field.setKeySequence("7")
-                self.SC_Inc_1_Small_field.setKeySequence("9")
-                self.SC_Dec_2_Small_field.setKeySequence("4")
-                self.SC_Inc_2_Small_field.setKeySequence("6")
-                self.SC_Dec_3_Small_field.setKeySequence("1")
-                self.SC_Inc_3_Small_field.setKeySequence("3")
-                self.SC_Dec_1_Large_field.setKeySequence("Ctrl+7")
-                self.SC_Inc_1_Large_field.setKeySequence("Ctrl+9")
-                self.SC_Dec_2_Large_field.setKeySequence("Ctrl+4")
-                self.SC_Inc_2_Large_field.setKeySequence("Ctrl+6")
-                self.SC_Dec_3_Large_field.setKeySequence("Ctrl+1")
-                self.SC_Inc_3_Large_field.setKeySequence("Ctrl+3")
-
-        def saveGlobalPrefs(self):
-            # change these global values to the new values in Prefs
-            global customKeys, autoConnectToLights, printDebug, rememberLightsOnExit, rememberPresetsOnExit, autoReconnectOnDisconnect, maxNumOfAttempts, acceptable_HTTP_IPs, whiteListedMACs, hideConsoleOnLaunch, minimizeToTrayOnClose, httpAutoStart, httpPort, cctFallbackMode, enableLogTab, logToFile, globalCCTMin, globalCCTMax, globalCCTMin, globalCCTMax, enableLogTab, logToFile, globalCCTMin, globalCCTMax, cctFallbackMode
-
-            finalPrefs = [] # list of final prefs to merge together at the end
-
-            if not self.findLightsOnStartup_check.isChecked(): # this option is usually on, so only add on false
-                finalPrefs.append("findLightsOnStartup=0")
-            
-            if not self.autoConnectToLights_check.isChecked(): # this option is usually on, so only add on false
-                autoConnectToLights = False
-                finalPrefs.append("autoConnectToLights=0")
-            else:
-                autoConnectToLights = True
-            
-            if not self.printDebug_check.isChecked(): # this option is usually on, so only add on false
-                printDebug = False
-                finalPrefs.append("printDebug=0")
-            else:
-                printDebug = True
-            
-            if self.rememberLightsOnExit_check.isChecked(): # this option is usually off, so only add on true
-                rememberLightsOnExit = True
-                finalPrefs.append("rememberLightsOnExit=1")
-            else:
-                rememberLightsOnExit = False
-
-            if not self.rememberPresetsOnExit_check.isChecked(): # this option is usually on, so only add if false
-                rememberPresetsOnExit = False
-                finalPrefs.append("rememberPresetsOnExit=0")
-            else:
-                rememberPresetsOnExit = True
-
-            global livePreview
-            if not self.livePreview_check.isChecked():
-                livePreview = False
-                finalPrefs.append("livePreview=0")
-                self.applyButton.setVisible(True)
-            else:
-                livePreview = True
-                self.applyButton.setVisible(False)
-
-            if not self.autoReconnect_check.isChecked(): # this option is usually on, so only add if false
-                autoReconnectOnDisconnect = False
-                finalPrefs.append("autoReconnectOnDisconnect=0")
-            else:
-                autoReconnectOnDisconnect = True
-
-            if self.hideConsoleOnLaunch_check.isChecked(): # this option is usually off, so only add on true
-                hideConsoleOnLaunch = True
-                finalPrefs.append("hideConsoleOnLaunch=1")
-                hideConsoleWindow()
-                if hasattr(self, '_consoleVisible'):
-                    self._consoleVisible = False
-                    if self._consoleAction:
-                        self._consoleAction.setText("Show Console")
-            else:
-                hideConsoleOnLaunch = False
-                showConsoleWindow()
-                if hasattr(self, '_consoleVisible'):
-                    self._consoleVisible = True
-                    if self._consoleAction:
-                        self._consoleAction.setText("Hide Console")
-
-            if not self.minimizeToTrayOnClose_check.isChecked(): # this option is usually on, so only add if false
-                minimizeToTrayOnClose = False
-                finalPrefs.append("minimizeToTrayOnClose=0")
-            else:
-                minimizeToTrayOnClose = True
-
-            if self.httpAutoStart_check.isChecked(): # this option is usually off, so only add on true
-                httpAutoStart = True
-                finalPrefs.append("httpAutoStart=1")
-            else:
-                httpAutoStart = False
-
-            try:
-                _port = int(self.httpPortField.text().strip())
-                if not 1024 <= _port <= 65535:
-                    raise ValueError
-            except ValueError:
-                _port = 8080
-                self.httpPortField.setText("8080")
-            httpPort = _port
-            if httpPort != 8080: # only save non-default
-                finalPrefs.append("httpPort=" + str(httpPort))
-
-            cctFallbackMode = "convert" if self.cctFallbackCombo.currentIndex() == 0 else "ignore"
-            if cctFallbackMode != "convert":  # only save non-default
-                finalPrefs.append("cctFallbackMode=" + cctFallbackMode)
-
-            if not self.enableLogTab_check.isChecked():
-                enableLogTab = False
-                finalPrefs.append("enableLogTab=0")
-            else:
-                enableLogTab = True
-
-            if self.logToFile_check.isChecked():
-                logToFile = True
-                finalPrefs.append("logToFile=1")
-            else:
-                logToFile = False
-
-            globalCCTMin = self.globalCCTMinSpin.value()
-            globalCCTMax = self.globalCCTMaxSpin.value()
-            if globalCCTMin > globalCCTMax:
-                globalCCTMin, globalCCTMax = globalCCTMax, globalCCTMin
-                self.globalCCTMinSpin.setValue(globalCCTMin)
-                self.globalCCTMaxSpin.setValue(globalCCTMax)
-            if globalCCTMin != 3200:
-                finalPrefs.append("globalCCTMin=" + str(globalCCTMin))
-            if globalCCTMax != 5600:
-                finalPrefs.append("globalCCTMax=" + str(globalCCTMax))
-            
-            maxAttemptText = self.maxNumOfAttempts_field.text().strip()
-            if maxAttemptText == "" or not maxAttemptText.isdigit():
-                maxAttemptText = "6"  # default
-                self.maxNumOfAttempts_field.setText(maxAttemptText)
-            if maxAttemptText != "6": # the default for this option is 6 attempts
-                maxNumOfAttempts = int(maxAttemptText)
-                finalPrefs.append("maxNumOfAttempts=" + maxAttemptText)
-            else:
-                maxNumOfAttempts = 6
-
-            # FIGURE OUT IF THE HTTP IP ADDRESSES HAVE CHANGED
-            returnedList_HTTP_IPs = self.acceptable_HTTP_IPs_field.toPlainText().split("\n")
-            
-            if returnedList_HTTP_IPs != ["127.0.0.1", "192.168.", "10."]: # if the list of HTTP IPs have changed
-                acceptable_HTTP_IPs = returnedList_HTTP_IPs # change the global HTTP IPs available
-                finalPrefs.append("acceptable_HTTP_IPs=" + ";".join(acceptable_HTTP_IPs)) # add the new ones to the preferences
-            else:
-                acceptable_HTTP_IPs = ["127.0.0.1", "192.168.", "10."] # if we reset the IPs, then re-reset the parameter
-
-            # ADD WHITELISTED LIGHTS TO PREFERENCES IF THEY EXIST
-            returnedList_whiteListedMACs = self.whiteListedMACs_field.toPlainText().replace(" ", "").split("\n") # remove spaces and split on newlines
-
-            if returnedList_whiteListedMACs[0] != "": # if we have any MAC addresses specified
-                whiteListedMACs = returnedList_whiteListedMACs # then set the list to the addresses specified
-                finalPrefs.append("whiteListedMACs=" + ";".join(whiteListedMACs)) # add the new addresses to the preferences
-            else:
-                whiteListedMACs = [] # or clear the list
-            
-            # SET THE NEW KEYBOARD SHORTCUTS TO THE VALUES IN PREFERENCES
-            customKeys[0] = self.SC_turnOffButton_field.getKeySequence()
-            customKeys[1] = self.SC_turnOnButton_field.getKeySequence()
-            customKeys[2] = self.SC_scanCommandButton_field.getKeySequence()
-            customKeys[3] = self.SC_tryConnectButton_field.getKeySequence()
-            customKeys[4] = self.SC_Tab_CCT_field.getKeySequence()
-            customKeys[5] = self.SC_Tab_HSI_field.getKeySequence()
-            customKeys[6] = self.SC_Tab_SCENE_field.getKeySequence()
-            customKeys[7] = self.SC_Tab_PREFS_field.getKeySequence()
-            customKeys[8] = self.SC_Dec_Bri_Small_field.getKeySequence()
-            customKeys[9] = self.SC_Inc_Bri_Small_field.getKeySequence()
-            customKeys[10] = self.SC_Dec_Bri_Large_field.getKeySequence()
-            customKeys[11] = self.SC_Inc_Bri_Large_field.getKeySequence()
-            customKeys[12] = self.SC_Dec_1_Small_field.getKeySequence()
-            customKeys[13] = self.SC_Inc_1_Small_field.getKeySequence()
-            customKeys[14] = self.SC_Dec_2_Small_field.getKeySequence()
-            customKeys[15] = self.SC_Inc_2_Small_field.getKeySequence()
-            customKeys[16] = self.SC_Dec_3_Small_field.getKeySequence()
-            customKeys[17] = self.SC_Inc_3_Small_field.getKeySequence()
-            customKeys[18] = self.SC_Dec_1_Large_field.getKeySequence()
-            customKeys[19] = self.SC_Inc_1_Large_field.getKeySequence()
-            customKeys[20] = self.SC_Dec_2_Large_field.getKeySequence()
-            customKeys[21] = self.SC_Inc_2_Large_field.getKeySequence()
-            customKeys[22] = self.SC_Dec_3_Large_field.getKeySequence()
-            customKeys[23] = self.SC_Inc_3_Large_field.getKeySequence()
-
-            self.setupShortcutKeys() # change shortcut key assignments to the new values in prefs
-
-            if customKeys[0] != "Ctrl+PgDown": 
-                finalPrefs.append("SC_turnOffButton=" + customKeys[0])
-            
-            if customKeys[1] != "Ctrl+PgUp":
-                finalPrefs.append("SC_turnOnButton=" + customKeys[1])
-            
-            if customKeys[2] != "Ctrl+Shift+S":
-                finalPrefs.append("SC_scanCommandButton=" + customKeys[2])
-            
-            if customKeys[3] != "Ctrl+Shift+C":
-                finalPrefs.append("SC_tryConnectButton=" + customKeys[3])
-            
-            if customKeys[4] != "Alt+1":
-                finalPrefs.append("SC_Tab_CCT=" + customKeys[4])
-            
-            if customKeys[5] != "Alt+2":
-                finalPrefs.append("SC_Tab_HSI=" + customKeys[5])
-            
-            if customKeys[6] != "Alt+3":
-                finalPrefs.append("SC_Tab_SCENE=" + customKeys[6])
-            
-            if customKeys[7] != "Alt+4":
-                finalPrefs.append("SC_Tab_PREFS=" + customKeys[7])
-            
-            if customKeys[8] != "/":
-                finalPrefs.append("SC_Dec_Bri_Small=" + customKeys[8])
-            
-            if customKeys[9] != "*":
-                finalPrefs.append("SC_Inc_Bri_Small=" + customKeys[9])
-            
-            if customKeys[10] != "Ctrl+/":
-                finalPrefs.append("SC_Dec_Bri_Large=" + customKeys[10])
-            
-            if customKeys[11] != "Ctrl+*":
-                finalPrefs.append("SC_Inc_Bri_Large=" + customKeys[11])
-            
-            if customKeys[12] != "7":
-                finalPrefs.append("SC_Dec_1_Small=" + customKeys[12])
-            
-            if customKeys[13] != "9":
-                finalPrefs.append("SC_Inc_1_Small=" + customKeys[13])
-            
-            if customKeys[14] != "4":
-                finalPrefs.append("SC_Dec_2_Small=" + customKeys[14])
-            
-            if customKeys[15] != "6":
-                finalPrefs.append("SC_Inc_2_Small=" + customKeys[15])
-            
-            if customKeys[16] != "1":
-                finalPrefs.append("SC_Dec_3_Small=" + customKeys[16])
-            
-            if customKeys[17] != "3":
-                finalPrefs.append("SC_Inc_3_Small=" + customKeys[17])
-            
-            if customKeys[18] != "Ctrl+7":
-                finalPrefs.append("SC_Dec_1_Large=" + customKeys[18])
-            
-            if customKeys[19] != "Ctrl+9":
-                finalPrefs.append("SC_Inc_1_Large=" + customKeys[19])
-            
-            if customKeys[20] != "Ctrl+4":
-                finalPrefs.append("SC_Dec_2_Large=" + customKeys[20])
-            
-            if customKeys[21] != "Ctrl+6":
-                finalPrefs.append("SC_Inc_2_Large=" + customKeys[21])
-            
-            if customKeys[22] != "Ctrl+1":
-                finalPrefs.append("SC_Dec_3_Large=" + customKeys[22])
-            
-            if customKeys[23] != "Ctrl+3":
-                finalPrefs.append("SC_Inc_3_Large=" + customKeys[23])
-
-            # CARRY "HIDDEN" DEBUGGING OPTIONS TO PREFERENCES FILE
-            if enableTabsOnLaunch == True:
-                finalPrefs.append("enableTabsOnLaunch=1")
-               
-            if len(finalPrefs) > 0: # if we actually have preferences to save...
-                with open(globalPrefsFile, mode="w", encoding="utf-8") as prefsFileToWrite:
-                    prefsFileToWrite.write(("\n").join(finalPrefs)) # then write them to the prefs file
-
-                # PRINT THIS INFORMATION WHETHER DEBUG OUTPUT IS TURNED ON OR NOT
-                print("New global preferences saved in " + globalPrefsFile + " - here is the list:")
-
-                for a in range(len(finalPrefs)):
-                    print(" > " + finalPrefs[a]) # iterate through the list of preferences and show the new value(s) you set
-            else: # there are no preferences to save, so clean up the file (if it exists)
-                print("There are no preferences to save (all preferences are currently set to their default values).")
-                
-                if os.path.exists(globalPrefsFile): # if a previous preferences file exists
-                    print("Since all preferences are set to their defaults, we are deleting the NeewerLux.prefs file.")
-                    os.remove(globalPrefsFile) # ...delete it!
-
-        def setupShortcutKeys(self):
-            self.SC_turnOffButton.setKey(QKeySequence(customKeys[0]))
-            self.SC_turnOnButton.setKey(QKeySequence(customKeys[1]))
-            self.SC_scanCommandButton.setKey(QKeySequence(customKeys[2]))
-            self.SC_tryConnectButton.setKey(QKeySequence(customKeys[3]))
-            self.SC_Tab_CCT.setKey(QKeySequence(customKeys[4]))
-            self.SC_Tab_HSI.setKey(QKeySequence(customKeys[5]))
-            self.SC_Tab_SCENE.setKey(QKeySequence(customKeys[6]))
-            self.SC_Tab_PREFS.setKey(QKeySequence(customKeys[7]))
-            self.SC_Dec_Bri_Small.setKey(QKeySequence(customKeys[8]))
-            self.SC_Inc_Bri_Small.setKey(QKeySequence(customKeys[9]))
-            self.SC_Dec_Bri_Large.setKey(QKeySequence(customKeys[10]))
-            self.SC_Inc_Bri_Large.setKey(QKeySequence(customKeys[11]))
-
-            # IF THERE ARE CUSTOM KEYS SET UP FOR THE SMALL INCREMENTS, SET THEM HERE (AS THE NUMPAD KEYS WILL BE TAKEN AWAY IN THAT INSTANCE):
-            if customKeys[12] != "7":
-                self.SC_Dec_1_Small.setKey(QKeySequence(customKeys[12]))
-            else: # if we changed back to default, clear the key assignment if there was one before
-                self.SC_Dec_1_Small.setKey("")
-
-            if customKeys[13] != "9":
-                self.SC_Inc_1_Small.setKey(QKeySequence(customKeys[13]))
-            else:
-                self.SC_Inc_1_Small.setKey("")
-
-            if customKeys[14] != "4":
-                self.SC_Dec_2_Small.setKey(QKeySequence(customKeys[14]))
-            else:
-                self.SC_Dec_2_Small.setKey("")
-            
-            if customKeys[15] != "6":
-                self.SC_Inc_2_Small.setKey(QKeySequence(customKeys[15]))
-            else:
-                self.SC_Inc_2_Small.setKey("")
-
-            if customKeys[16] != "1":
-                self.SC_Dec_3_Small.setKey(QKeySequence(customKeys[16]))
-            else:
-                self.SC_Dec_3_Small.setKey("")
-
-            if customKeys[17] != "3":
-                self.SC_Inc_3_Small.setKey(QKeySequence(customKeys[17]))
-            else:
-                self.SC_Inc_3_Small.setKey("")
-                
-            self.SC_Dec_1_Large.setKey(QKeySequence(customKeys[18]))
-            self.SC_Inc_1_Large.setKey(QKeySequence(customKeys[19]))
-            self.SC_Dec_2_Large.setKey(QKeySequence(customKeys[20]))
-            self.SC_Inc_2_Large.setKey(QKeySequence(customKeys[21]))
-            self.SC_Dec_3_Large.setKey(QKeySequence(customKeys[22]))
-            self.SC_Inc_3_Large.setKey(QKeySequence(customKeys[23]))
-
-        # CHECK TO SEE WHETHER OR NOT TO ENABLE/DISABLE THE "Connect" BUTTON OR CHANGE THE PREFS TAB
-        def selectionChanged(self):
-            selectedRows = self.selectedLights() # get the list of currently selected lights
-
-            if len(selectedRows) > 0: # if we have a selection
-                self.tryConnectButton.setEnabled(True) # if we have light(s) selected in the table, then enable the "Connect" button
-
-                if len(selectedRows) == 1: # we have exactly one light selected
-                    self.ColorModeTabWidget.setTabEnabled(4, True) # enable the "Preferences" tab for this light
-
-                    # SWITCH THE TURN ON/OFF BUTTONS ON, AND CHANGE TEXT TO SINGLE BUTTON TEXT
-                    self.turnOffButton.setText("Turn Light Off")
-                    self.turnOffButton.setEnabled(True)
-                    self.turnOnButton.setText("Turn Light On")
-                    self.turnOnButton.setEnabled(True)
-
-                    self.ColorModeTabWidget.setTabEnabled(0, True)
-
-                    if availableLights[selectedRows[0]][5] == True: # if this light is CCT only, then disable the HSI and ANM tabs
-                        self.ColorModeTabWidget.setTabEnabled(1, False) # disable the HSI mode tab
-                        self.ColorModeTabWidget.setTabEnabled(2, False) # disable the ANM/SCENE tab
-                    else: # we can use HSI and ANM/SCENE modes, so enable those tabs
-                        self.ColorModeTabWidget.setTabEnabled(1, True) # enable the HSI mode tab
-                        self.ColorModeTabWidget.setTabEnabled(2, True) # enable the ANM/SCENE tab
-
-                    currentlySelectedRow = selectedRows[0] # get the row index of the 1 selected item
-                    self.checkLightTab(currentlySelectedRow) # if we're on CCT, check to see if this light can use extended values + on Prefs, update Prefs
-
-                    # RECALL LAST SENT SETTING FOR THIS PARTICULAR LIGHT, IF A SETTING EXISTS
-                    if availableLights[currentlySelectedRow][3] != []: # if the last set parameters aren't empty
-                        if availableLights[currentlySelectedRow][6] != False: # if the light is listed as being turned ON
-                            sendValue = availableLights[currentlySelectedRow][3] # make the current "sendValue" the last set parameter so it doesn't re-send it on re-load
-
-                            if sendValue[1] == 135: # the last parameter was a CCT mode change
-                                self.setUpGUI(colorMode="CCT",
-                                        brightness=sendValue[3],
-                                        temp=sendValue[4])
-                            elif sendValue[1] == 134: # the last parameter was a HSI mode change
-                                self.setUpGUI(colorMode="HSI",
-                                        hue=sendValue[3] + (256 * sendValue[4]),
-                                        sat=sendValue[5],
-                                        brightness=sendValue[6])
-                            elif sendValue[1] == 136: # the last parameter was a ANM/SCENE mode change
-                                self.setUpGUI(colorMode="ANM",
-                                        brightness=sendValue[3],
-                                        scene=sendValue[4])
-                        else:
-                            self.ColorModeTabWidget.setCurrentIndex(0) # switch to the CCT tab if the light is off and there ARE prior parameters
-                    else:
-                        self.ColorModeTabWidget.setCurrentIndex(0) # switch to the CCT tab if there are no prior parameters
-                else: # we have multiple lights selected
-                    # SWITCH THE TURN ON/OFF BUTTONS ON, AND CHANGE TEXT TO MULTIPLE LIGHTS TEXT
-                    self.turnOffButton.setText("Turn Light(s) Off")
-                    self.turnOffButton.setEnabled(True)
-                    self.turnOnButton.setText("Turn Light(s) On")
-                    self.turnOnButton.setEnabled(True)
-
-                    self.ColorModeTabWidget.setTabEnabled(0, True)
-                    self.ColorModeTabWidget.setTabEnabled(1, True) # enable the "HSI" mode tab
-                    self.ColorModeTabWidget.setTabEnabled(2, True) # enable the "ANM/SCENE" mode tab
-                    self.ColorModeTabWidget.setTabEnabled(4, False) # disable the "Preferences" tab, as we have multiple lights selected
-            else: # the selection has been cleared or there are no lights to select
-                currentTab = self.ColorModeTabWidget.currentIndex() # get the currently selected tab (so when we disable the tabs, we stick on the current one)
-                self.tryConnectButton.setEnabled(False) # if we have no lights selected, disable the Connect button
-
-                # SWITCH THE TURN ON/OFF BUTTONS OFF, AND CHANGE TEXT TO GENERIC TEXT
-                self.turnOffButton.setText("Turn Light(s) Off")
-                self.turnOffButton.setEnabled(False)
-                self.turnOnButton.setText("Turn Light(s) On")
-                self.turnOnButton.setEnabled(False)
-
-                self.ColorModeTabWidget.setTabEnabled(0, False) # disable the "CCT" mode tab
-                self.ColorModeTabWidget.setTabEnabled(1, False) # disable the "HSI" mode tab
-                self.ColorModeTabWidget.setTabEnabled(2, False) # disable the "ANM/SCENE" mode tab
-                # Animations tab (3) stays enabled
-                self.ColorModeTabWidget.setTabEnabled(4, False) # disable the "Preferences" tab, as we have no lights selected
-
-                if currentTab not in (3, 5): # if user is on Animations or Global Prefs, keep them there
-                    self.ColorModeTabWidget.setCurrentIndex(currentTab) # disable the tabs, but don't switch the current one shown
-                else:
-                    self.ColorModeTabWidget.setCurrentIndex(0) # if we're on Prefs, then switch to the CCT tab
-
-                self.checkLightTab() # check to see if we're on the CCT tab - if we are, then restore order
-
-        # ADD A LIGHT TO THE TABLE VIEW
-        def setTheTable(self, infoArray, rowToChange = -1):
-            """Update the light table. Must be called from the main/GUI thread."""
-            if rowToChange == -1:
-                currentRow = self.lightTable.rowCount()
-                self.lightTable.insertRow(currentRow) # if rowToChange is not specified, then we'll make a new row at the end
-                self.lightTable.setItem(currentRow, 0, QTableWidgetItem())
-                self.lightTable.setItem(currentRow, 1, QTableWidgetItem())
-                self.lightTable.setItem(currentRow, 2, QTableWidgetItem())
-                self.lightTable.setItem(currentRow, 3, QTableWidgetItem())
-            else:
-                currentRow = rowToChange # change data for the specified row
-
-            # THIS SECTION BELOW LIMITS UPDATING THE TABLE **ONLY** IF THE DATA SUPPLIED IS DIFFERENT THAN IT WAS ORIGINALLY
-            if infoArray[0] != "": # the name of the light
-                if rowToChange == -1 or (rowToChange != -1 and infoArray[0] != self.returnTableInfo(rowToChange, 0)):
-                    self.lightTable.item(currentRow, 0).setText(infoArray[0])
-            if infoArray[1] != "": # the MAC address of the light
-                if rowToChange == -1 or (rowToChange != -1 and infoArray[1] != self.returnTableInfo(rowToChange, 1)):
-                    self.lightTable.item(currentRow, 1).setText(infoArray[1])
-            if infoArray[2] != "": # the Linked status of the light
-                if rowToChange == -1 or (rowToChange != -1 and infoArray[2] != self.returnTableInfo(rowToChange, 2)):
-                    self.lightTable.item(currentRow, 2).setText(infoArray[2])
-                    self.lightTable.item(currentRow, 2).setTextAlignment(Qt.AlignCenter) # align the light status info to be center-justified
-            if infoArray[3] != "": # the current status message of the light
-                if rowToChange == -1 or (rowToChange != -1 and infoArray[3] != self.returnTableInfo(rowToChange, 3)):
-                    self.lightTable.item(currentRow, 3).setText(infoArray[3])
-
-            self.lightTable.resizeRowsToContents()
-
-        def returnTableInfo(self, row, column):
-            return self.lightTable.item(row, column).text()
-
-        def _appendLog(self, msg):
-            """Append a timestamped message to the Log tab (main thread only)."""
-            if enableLogTab:
-                sb = self.logTextEdit.verticalScrollBar()
-                atBottom = sb.value() >= sb.maximum() - 10
-                self.logTextEdit.appendPlainText(msg)
-                if atBottom:
-                    sb.setValue(sb.maximum())
-
-        def _saveLogToFile(self):
-            """Save current log contents to the log file."""
-            try:
-                createLightPrefsFolder()
-                with open(logFilePath, "w", encoding="utf-8") as f:
-                    f.write(self.logTextEdit.toPlainText())
-                self.statusBar.showMessage("Log saved to " + logFilePath)
-            except Exception as e:
-                self.statusBar.showMessage("Error saving log: " + str(e))
-
-        def _checkForUpdates(self):
-            """Check GitHub for a newer version of NeewerLux (runs in a background thread)."""
-            self.checkUpdateButton.setEnabled(False)
-            self.checkUpdateButton.setText("Checking...")
-            self.updateBanner.setVisible(False)
-
-            def _doCheck():
-                try:
-                    import urllib.request, json as _json
-                    req = urllib.request.Request(NEEWERLUX_RELEASES_API,
-                        headers={"User-Agent": "NeewerLux/" + NEEWERLUX_VERSION, "Accept": "application/vnd.github.v3+json"})
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        data = _json.loads(resp.read().decode("utf-8"))
-                    tag = data.get("tag_name", "").lstrip("vV")
-                    url = data.get("html_url", NEEWERLUX_REPO_URL + "releases")
-                    body = data.get("body", "")[:200]
-                    self._updateResultSignal.emit(tag, url, body, "")
-                except Exception as e:
-                    self._updateResultSignal.emit("", "", "", str(e))
-
-            import threading
-            threading.Thread(target=_doCheck, daemon=True, name="updateCheck").start()
-
-        def _onUpdateResult(self, tag, url, body, err):
-            """Handle update check result on the main thread (via signal)."""
-            self.checkUpdateButton.setEnabled(True)
-            self.checkUpdateButton.setText("Check for Updates")
-            if err:
-                self.updateBanner.setText("Could not check for updates: " + err)
-                self.updateBanner.setStyleSheet("QLabel { background-color: #3a2a1a; color: #ff9800; padding: 8px; border: 1px solid #ff9800; border-radius: 4px; }")
-                self.updateBanner.setVisible(True)
-            elif tag and tag != NEEWERLUX_VERSION:
-                try:
-                    remote = tuple(int(x) for x in tag.split("."))
-                    local = tuple(int(x) for x in NEEWERLUX_VERSION.split("."))
-                    if remote > local:
-                        notePreview = (" — " + body.split("\n")[0]) if body else ""
-                        self.updateBanner.setText(
-                            "<b>Update available: v" + tag + "</b>" + notePreview +
-                            "<br><a href='" + url + "' style='color:#81c784'>Download from GitHub</a>")
-                        self.updateBanner.setStyleSheet("QLabel { background-color: #1a3a1a; color: #4caf50; padding: 8px; border: 1px solid #4caf50; border-radius: 4px; }")
-                        self.updateBanner.setVisible(True)
-                        return
-                except (ValueError, TypeError):
-                    pass
-                self.updateBanner.setText("You are running NeewerLux v" + NEEWERLUX_VERSION + " (latest: v" + tag + ")")
-                self.updateBanner.setStyleSheet("QLabel { background-color: #1a2a3a; color: #64b5f6; padding: 8px; border: 1px solid #64b5f6; border-radius: 4px; }")
-                self.updateBanner.setVisible(True)
-            else:
-                self.updateBanner.setText("You are running the latest version (v" + NEEWERLUX_VERSION + ")")
-                self.updateBanner.setStyleSheet("QLabel { background-color: #1a3a1a; color: #4caf50; padding: 8px; border: 1px solid #4caf50; border-radius: 4px; }")
-                self.updateBanner.setVisible(True)
-
-        # CLEAR ALL LIGHTS FROM THE TABLE VIEW
-        def clearTheTable(self):
-            if self.lightTable.rowCount() != 0:
-                self.lightTable.clearContents()
-                self.lightTable.setRowCount(0)
-
-        def selectRows(self, rowsToSelect):
-            self.lightTable.clearSelection()
-            indexes = [self.lightTable.model().index(r, 0) for r in rowsToSelect]
-            [self.lightTable.selectionModel().select(i, QItemSelectionModel.Select | QItemSelectionModel.Rows) for i in indexes]
-            
-        # TELL THE BACKGROUND THREAD TO START LOOKING FOR LIGHTS
-        def startSelfSearch(self):
-            global threadAction
-            threadAction = "discover"
-
-            self.statusBar.showMessage("Please wait - searching for Neewer lights...")
-
-        # TELL THE BACKGROUND THREAD TO START CONNECTING TO LIGHTS
-        def startConnect(self):
-            global threadAction
-            threadAction = "connect"
-
-        # TELL THE BACKGROUND THREAD TO START SENDING TO THE LIGHTS
-        def startSend(self):
-            global threadAction
-
-            # If live preview is off, don't auto-send, user clicks Apply instead
-            if not livePreview:
-                return
-
-            # If an animation is playing, stop it, user is taking manual control
-            if animationRunning:
-                stopAnimation()
-                self.animPlayButton.setEnabled(True)
-                self.animStopButton.setEnabled(False)
-                self.animStatusLabel.setText("Stopped")
-
-            if threadAction == "":
-                threadAction = "send"
-
-        def manualApply(self):
-            """Send current values when live preview is off."""
-            global threadAction
-
-            if animationRunning:
-                stopAnimation()
-                self.animPlayButton.setEnabled(True)
-                self.animStopButton.setEnabled(False)
-                self.animStatusLabel.setText("Stopped")
-
-            if threadAction == "":
-                threadAction = "send"
-
-        # IF YOU CLICK ON ONE OF THE TABS, THIS WILL SWITCH THE VIEW/SEND A NEW SIGNAL FROM THAT SPECIFIC TAB
-        def tabChanged(self, i):
-            currentSelection = self.selectedLights() # get the list of currently selected lights
-
-            if i == 0: # we clicked on the CCT tab
-                if len(currentSelection) > 0: # if we have something selected
-                    if len(currentSelection) == 1: # if we have just one light selected
-                        self.checkLightTab(currentSelection[0]) # set up the current light's CCT bounds
-                    else:
-                        self.checkLightTab() # reset the bounds to the normal values (5600K)
-                # Always compute the bytestring so Apply has current values ready
-                self.computeValueCCT()
-            elif i == 1: # we clicked on the HSI tab
-                if len(currentSelection) == 1:
-                    self.HSI_Sat_Gradient_BG.setStops(self.getHSISatStops(self.Slider_HSI_1_H.value()))
-                # Always compute the bytestring so Apply has current values ready
-                self.computeValueHSI()
-            elif i == 2: # we clicked on the SCENE tab
-                pass # skip this, we don't want the animation automatically triggering when we go to this page
-            elif i == 3: # we clicked on the ANIMATIONS tab
-                pass # no automatic action needed
-            elif i == 4: # we clicked on the LIGHT PREFS tab
-                if len(currentSelection) == 1:
-                    self.setupLightPrefsTab(currentSelection[0])
-            elif i == 5: # we clicked on the Global PREFS tab
-                self.setupGlobalLightPrefsTab()
-            elif i == 6: # Info tab
-                pass
-            elif i == 7: # Log tab
-                pass
-
-        # COMPUTE A BYTESTRING FOR THE CCT SECTION
-        def computeValueCCT(self, hueOrBrightness = -1):
-            global CCTSlider
-            CCTSlider = hueOrBrightness # set the global CCT "current slider" to the slider you just... slid
-
-            if CCTSlider == 1: # we dragged the color temperature slider
-                self.TFV_CCT_Hue.setText(str(self.Slider_CCT_Hue.value()) + "00K")
-            else: # we dragged the brightness slider
-                self.TFV_CCT_Bright.setText(str(self.Slider_CCT_Bright.value()) + "%")
-
-            calculateByteString(colorMode="CCT",\
-                                temp=str(int(self.Slider_CCT_Hue.value())),\
-                                brightness=str(int(self.Slider_CCT_Bright.value())))
-
-            self.statusBar.showMessage("Current value (CCT Mode): " + updateStatus())
-            self.startSend()
-
-        # COMPUTE A BYTESTRING FOR THE HSI SECTION
-        def computeValueHSI(self, slidSlider = -1):
-            calculateByteString(colorMode="HSI",\
-                                HSI_H=str(int(self.Slider_HSI_1_H.value())),\
-                                HSI_S=str(int(self.Slider_HSI_2_S.value())),\
-                                HSI_I=str(int(self.Slider_HSI_3_L.value())))
-
-            if slidSlider == 1: # we dragged the hue slider
-                self.TFV_HSI_1_H.setText(str(int(self.Slider_HSI_1_H.value())) + "º")
-                self.HSI_Sat_Gradient_BG.setStops(self.getHSISatStops(self.Slider_HSI_1_H.value()))
-            elif slidSlider == 2: # we dragged the saturation slider
-                self.TFV_HSI_2_S.setText(str(int(self.Slider_HSI_2_S.value())) + "%")
-            elif slidSlider == 3: # we dragged the intensity slider
-                self.TFV_HSI_3_L.setText(str(int(self.Slider_HSI_3_L.value())) + "%")
-            
-            self.statusBar.showMessage("Current value (HSI Mode): " + updateStatus())
-            self.startSend()
-
-        # COMPUTE A BYTESTRING FOR THE ANIM SECTION
-        def computeValueANM(self, buttonPressed):
-            global lastAnimButtonPressed
-
-            if buttonPressed == 0:
-                buttonPressed = lastAnimButtonPressed
-                self.TFV_ANM_Brightness.setText(str(int(self.Slider_ANM_Brightness.value())) + "%")
-            else:
-                # Map button IDs to button widgets
-                _sceneButtons = {
-                    1: self.Button_1_police_A, 2: self.Button_1_police_B, 3: self.Button_1_police_C,
-                    4: self.Button_2_party_A, 5: self.Button_2_party_B, 6: self.Button_2_party_C,
-                    7: self.Button_3_lightning_A, 8: self.Button_3_lightning_B, 9: self.Button_3_lightning_C
-                }
-
-                # Deactivate old button
-                if lastAnimButtonPressed in _sceneButtons:
-                    btn = _sceneButtons[lastAnimButtonPressed]
-                    btn.setProperty("activeScene", False)
-                    btn.style().unpolish(btn)
-                    btn.style().polish(btn)
-
-                # Activate new button
-                if buttonPressed in _sceneButtons:
-                    btn = _sceneButtons[buttonPressed]
-                    btn.setProperty("activeScene", True)
-                    btn.style().unpolish(btn)
-                    btn.style().polish(btn)
-
-                lastAnimButtonPressed = buttonPressed
-
-            calculateByteString(colorMode="ANM",\
-                                brightness=str(int(self.Slider_ANM_Brightness.value())),\
-                                animation=str(buttonPressed))
-
-            self.statusBar.showMessage("Current value (ANM Mode): " + updateStatus())
-            self.startSend()
-
-        def turnLightOn(self):
-            global threadAction
-            setPowerBytestring("ON")
-            self.statusBar.showMessage("Turning light on")
-            # Power commands always send immediately, even with live preview off
-            if animationRunning:
-                stopAnimation()
-                self.animPlayButton.setEnabled(True)
-                self.animStopButton.setEnabled(False)
-                self.animStatusLabel.setText("Stopped")
-            if threadAction == "":
-                threadAction = "send"
-
-        def turnLightOff(self):
-            global threadAction
-            setPowerBytestring("OFF")
-            self.statusBar.showMessage("Turning light off")
-            # Power commands always send immediately, even with live preview off
-            if animationRunning:
-                stopAnimation()
-                self.animPlayButton.setEnabled(True)
-                self.animStopButton.setEnabled(False)
-                self.animStatusLabel.setText("Stopped")
-            if threadAction == "":
-                threadAction = "send"
-
-        # ==============================================================
-        # FUNCTIONS TO RETURN / MODIFY VALUES RUNNING IN THE GUI
-        # ==============================================================
-
-        # RETURN THE ROW INDEXES THAT ARE CURRENTLY HIGHLIGHTED IN THE TABLE VIEW
-        def selectedLights(self):
-            selectionList = []
-
-            if threadAction != "quit":
-                currentSelection = self.lightTable.selectionModel().selectedRows()
-
-                for a in range(len(currentSelection)):
-                    selectionList.append(currentSelection[a].row()) # add the row index of the nth selected light to the selectionList array
-
-            return selectionList # return the row IDs that are currently selected, or an empty array ([]) otherwise
-
-        # UPDATE THE TABLE WITH THE CURRENT INFORMATION FROM availableLights
-        def updateLights(self, updateTaskbar = True, applyPreferredOrder = True):
-            # Reorder availableLights so preferred-ID lights come first in ID order
-            # (skip this when the user is manually sorting the table by column header)
-            if applyPreferredOrder:
-                reorderByPreferredID()
-
-            self.clearTheTable()
-
-            if updateTaskbar == True: # if we're scanning for lights, then update the taskbar - if we're just sorting, then don't
-                if len(availableLights) != 0: # if we found lights on the last scan
-                    if self.scanCommandButton.text() == "Scan":
-                        self.scanCommandButton.setText("Re-scan") # change the "Scan" button to "Re-scan"
-
-                    if len(availableLights) == 1: # we found 1 light
-                        self.statusBar.showMessage("We located 1 Neewer light on the last search")
-                    elif len(availableLights) > 1: # we found more than 1 light
-                        self.statusBar.showMessage("We located " + str(len(availableLights)) + " Neewer lights on the last search")
-                else: # if we didn't find any (additional) lights on the last scan
-                    self.statusBar.showMessage("We didn't locate any Neewer lights on the last search")
-
-            for a in range(len(availableLights)):
-                _rssi_str = _get_light_rssi(availableLights[a])
-                if availableLights[a][1] == "": # the light does not currently have a Bleak object connected to it
-                    if availableLights[a][2] != "": # the light has a custom name, so add the custom name to the light
-                        self.setTheTable([availableLights[a][2] + " (" + availableLights[a][0].name + ")" + "\n  [ʀssɪ: " + _rssi_str + " dBm]", availableLights[a][0].address, "Waiting", "Waiting to connect..."])
-                    else: # the light does not have a custom name, so just use the model # of the light
-                        self.setTheTable([availableLights[a][0].name + "\n  [ʀssɪ: " + _rssi_str + " dBm]", availableLights[a][0].address, "Waiting", "Waiting to connect..."])
-                else: # the light does have a Bleak object connected to it
-                    if availableLights[a][2] != "": # the light has a custom name, so add the custom name to the light
-                        if availableLights[a][1].is_connected: # we have a connection to the light
-                            self.setTheTable([availableLights[a][2] + " (" + availableLights[a][0].name + ")" + "\n  [ʀssɪ: " + _rssi_str + " dBm]", availableLights[a][0].address, "LINKED", "Waiting to send..."])
-                        else: # we're still trying to connect, or haven't started trying yet
-                            self.setTheTable([availableLights[a][2] + " (" + availableLights[a][0].name + ")" + "\n  [ʀssɪ: " + _rssi_str + " dBm]", availableLights[a][0].address, "Waiting", "Waiting to connect..."])
-                    else: # the light does not have a custom name, so just use the model # of the light
-                        if availableLights[a][1].is_connected:
-                            self.setTheTable([availableLights[a][0].name + "\n  [ʀssɪ: " + _rssi_str + " dBm]", availableLights[a][0].address, "LINKED", "Waiting to send..."])
-                        else:
-                            self.setTheTable([availableLights[a][0].name + "\n  [ʀssɪ: " + _rssi_str + " dBm]", availableLights[a][0].address, "Waiting", "Waiting to connect..."])
-
-            # Update vertical header labels to show effective IDs (preferred ID if set, else row number)
-            headerLabels = []
-            for a in range(len(availableLights)):
-                prefID = availableLights[a][8] if len(availableLights[a]) > 8 else 0
-                if prefID > 0:
-                    headerLabels.append(str(prefID))
-                else:
-                    headerLabels.append(str(a + 1))
-            self.lightTable.setVerticalHeaderLabels(headerLabels)
-
-        # === THEME TOGGLE ===
-        def toggleTheme(self):
-            self._isDarkTheme = not self._isDarkTheme
-            qss = getThemeQSS(self._isDarkTheme)
-            QApplication.instance().setStyleSheet(qss)
-            self.themeToggleBtn.setText("\u263E" if self._isDarkTheme else "\u2600")
-            self.themeToggleBtn.setToolTip("Switch to light theme" if self._isDarkTheme else "Switch to dark theme")
-
-        # === HTTP SERVER TOGGLE ===
-        def toggleHTTPServer(self):
-            global httpServerInstance, httpServerThread, httpServerRunning
-
-            if httpServerRunning:
-                # Stop the server
-                try:
-                    printDebugString("Stopping the HTTP server...")
-                    httpServerInstance.shutdown()  # unblocks serve_forever() in the thread
-                    httpServerThread.join(timeout=5)
-                    httpServerInstance.server_close()
-                    printDebugString("HTTP server stopped")
-                except Exception as e:
-                    printDebugString("Error stopping HTTP server: " + str(e))
-                httpServerInstance = None
-                httpServerThread = None
-                httpServerRunning = False
-                self.httpToggleBtn.setText("HTTP: OFF")
-                self.httpToggleBtn.setProperty("httpActive", False)
-                self.httpToggleBtn.style().unpolish(self.httpToggleBtn)
-                self.httpToggleBtn.style().polish(self.httpToggleBtn)
-                self.httpOpenWebUIBtn.setEnabled(False)
-                self.statusBar.showMessage("HTTP server stopped")
-                # Disable tray WebUI action if present
-                if hasattr(self, '_trayWebUIAction'):
-                    self._trayWebUIAction.setEnabled(False)
-            else:
-                # Start the server
-                try:
-                    httpServerInstance = ThreadingHTTPServer(("", httpPort), NLPythonServer)
-                    httpServerThread = threading.Thread(target=httpServerInstance.serve_forever, name="httpServerThread", daemon=True)
-                    httpServerThread.start()
-                    httpServerRunning = True
-                    self.httpToggleBtn.setText("HTTP: ON")
-                    self.httpToggleBtn.setProperty("httpActive", True)
-                    self.httpToggleBtn.style().unpolish(self.httpToggleBtn)
-                    self.httpToggleBtn.style().polish(self.httpToggleBtn)
-                    self.httpOpenWebUIBtn.setEnabled(True)
-                    printDebugString("HTTP server started on port " + str(httpPort))
-                    self.statusBar.showMessage("HTTP server running on port " + str(httpPort))
-                    # Enable tray WebUI action if present
-                    if hasattr(self, '_trayWebUIAction'):
-                        self._trayWebUIAction.setEnabled(True)
-                except OSError as e:
-                    printDebugString("Could not start HTTP server: " + str(e))
-                    self.statusBar.showMessage("HTTP server failed: " + str(e))
-                    httpServerInstance = None
-                    httpServerThread = None
-
-        def openWebUI(self):
-            """Open the WebUI dashboard in the default browser."""
-            import webbrowser
-            webbrowser.open("http://localhost:" + str(httpPort) + "/")
-
-        # === SYSTEM TRAY ===
-        def setupSystemTray(self):
-            if QSystemTrayIcon is None or not QSystemTrayIcon.isSystemTrayAvailable():
-                self._trayIcon = None
-                return
-
-            self._trayIcon = QSystemTrayIcon(self)
-
-            # Try to use the app icon, fall back to a generic one
-            iconPath = _resource_path("com.github.poizenjam.NeewerLux.png")
-            if not os.path.exists(iconPath):
-                iconPath = _resource_path("com.github.poizenjam.NeewerLux.ico")
-            if os.path.exists(iconPath):
-                self._trayIcon.setIcon(QIcon(iconPath))
-            else:
-                self._trayIcon.setIcon(self.windowIcon())
-
-            self._trayIcon.setToolTip("NeewerLux " + NEEWERLUX_VERSION)
-
-            trayMenu = QMenu()
-            showAction = trayMenu.addAction("Show / Hide")
-            showAction.triggered.connect(self._trayToggleVisibility)
-            trayMenu.addSeparator()
-            httpAction = trayMenu.addAction("Toggle HTTP Server")
-            httpAction.triggered.connect(self.toggleHTTPServer)
-            self._trayWebUIAction = trayMenu.addAction("Open WebUI")
-            self._trayWebUIAction.triggered.connect(self.openWebUI)
-            self._trayWebUIAction.setEnabled(httpServerRunning)
-            self._consoleAction = None
-            self._consoleVisible = not _hasConsole  # False if no console (pythonw)
-            if _hasConsole:
-                consoleAction = trayMenu.addAction("Hide Console")
-                consoleAction.triggered.connect(self._trayToggleConsole)
-                self._consoleAction = consoleAction
-                self._consoleVisible = True
-            trayMenu.addSeparator()
-            quitAction = trayMenu.addAction("Quit")
-            quitAction.triggered.connect(self._trayQuit)
-
-            self._trayIcon.setContextMenu(trayMenu)
-            self._trayIcon.activated.connect(self._trayActivated)
-            self._trayIcon.show()
-
-        def saveWindowGeometry(self):
-            """Save window position, size, splitter state, and animation settings to a JSON file."""
-            try:
-                geo = {
-                    "x": self.x(), "y": self.y(),
-                    "width": self.width(), "height": self.height(),
-                    "splitter": self.mainSplitter.sizes(),
-                    "animSpeed": self.animSpeedCombo.currentText(),
-                    "animRate": self.animRateSpin.value(),
-                    "animBri": self.animBriSpin.value(),
-                    "animLoop": self.animLoopCheck.isChecked(),
-                    "animLoopCount": self.animLoopCountSpin.value(),
-                    "animParallel": self.animParallelCheck.isChecked(),
-                    "animRevert": self.animRevertCheck.isChecked()
-                }
-                # Save current tab index for recall on next launch
-                geo["lastTab"] = self.ColorModeTabWidget.currentIndex()
-                createLightPrefsFolder()
-                with open(geometryPrefsFile, "w", encoding="utf-8") as f:
-                    json.dump(geo, f)
-            except Exception:
-                pass
-
-        def restoreWindowGeometry(self):
-            """Restore window position, size, and splitter state from JSON file."""
-            try:
-                if os.path.exists(geometryPrefsFile):
-                    with open(geometryPrefsFile, "r", encoding="utf-8") as f:
-                        geo = json.load(f)
-                    x, y = geo["x"], geo["y"]
-                    w, h = geo["width"], geo["height"]
-
-                    # Ensure the window is at least partially visible on a connected screen
-                    screen = QApplication.instance().primaryScreen()
-                    if screen:
-                        avail = screen.availableGeometry()
-                        # If saved position is completely off-screen, reset to center
-                        if x + w < 0 or y + h < 0 or x > avail.width() or y > avail.height():
-                            x = max(0, (avail.width() - w) // 2)
-                            y = max(0, (avail.height() - h) // 2)
-
-                    self.move(x, y)
-                    self.resize(w, h)
-                    if "splitter" in geo:
-                        savedSizes = geo["splitter"]
-                        # Only apply if section count matches (handles upgrades from 2→3 sections)
-                        if len(savedSizes) == self.mainSplitter.count():
-                            self.mainSplitter.setSizes(savedSizes)
-                    # Restore animation tab settings
-                    if "animSpeed" in geo:
-                        val = geo["animSpeed"]
-                        if isinstance(val, int):
-                            self.animSpeedCombo.setCurrentIndex(val)
-                        else:
-                            idx = self.animSpeedCombo.findText(str(val))
-                            if idx >= 0:
-                                self.animSpeedCombo.setCurrentIndex(idx)
-                            else:
-                                self.animSpeedCombo.setEditText(str(val))
-                    if "animRate" in geo:
-                        self.animRateSpin.setValue(geo["animRate"])
-                    if "animBri" in geo:
-                        self.animBriSpin.setValue(geo["animBri"])
-                    if "animLoop" in geo:
-                        self.animLoopCheck.setChecked(geo["animLoop"])
-                    if "animLoopCount" in geo:
-                        self.animLoopCountSpin.setValue(geo["animLoopCount"])
-                    if "animParallel" in geo:
-                        self.animParallelCheck.setChecked(geo["animParallel"])
-                    if "animRevert" in geo:
-                        self.animRevertCheck.setChecked(geo["animRevert"])
-                    # Restore last active tab (default to Info tab on first launch)
-                    if "lastTab" in geo:
-                        tabIdx = geo["lastTab"]
-                        if 0 <= tabIdx < self.ColorModeTabWidget.count():
-                            self.ColorModeTabWidget.setCurrentIndex(tabIdx)
-            except Exception:
-                pass
-
-        def _trayToggleVisibility(self):
-            if self.isVisible():
-                self.hide()
-            else:
-                self.show()
-                self.activateWindow()
-                self.raise_()
-
-        def _trayToggleConsole(self):
-            if self._consoleVisible:
-                hideConsoleWindow()
-                self._consoleVisible = False
-                self._consoleAction.setText("Show Console")
-            else:
-                showConsoleWindow()
-                self._consoleVisible = True
-                self._consoleAction.setText("Hide Console")
-
-        def _trayActivated(self, reason):
-            """Double-click tray icon to toggle visibility."""
-            if reason == QSystemTrayIcon.DoubleClick:
-                self._trayToggleVisibility()
-
-        def _trayQuit(self):
-            """Quit for real, bypassing minimize-to-tray."""
-            self._forceQuit = True
-            if self._trayIcon:
-                self._trayIcon.hide()
-            self.close()
-
-        def _savePresetsQuick(self):
-            """Save custom presets and names to disk without shutting down.
-            Called when minimizing to tray so presets persist even if the process is killed later."""
-            if not rememberPresetsOnExit:
-                return
-            try:
-                customPresetsToWrite = ["numOfPresets=" + str(numOfPresets)]
-                for i in range(numOfPresets):
-                    if customLightPresets[i] != defaultLightPresets[i]:
-                        customPresetsToWrite.append(customPresetToString(i))
-                for idx, name in presetNames.items():
-                    if name:
-                        customPresetsToWrite.append("presetName" + str(idx) + "=" + name)
-
-                hasNonDefaultContent = len(customPresetsToWrite) > 1 or numOfPresets != 8
-                if hasNonDefaultContent:
-                    createLightPrefsFolder()
-                    with open(customLightPresetsFile, mode="w", encoding="utf-8") as f:
-                        f.write("\n".join(customPresetsToWrite))
-                    printDebugString("Quick-saved presets to " + customLightPresetsFile)
-                elif os.path.exists(customLightPresetsFile):
-                    os.remove(customLightPresetsFile)
-            except Exception as e:
-                printDebugString("Error quick-saving presets: " + str(e))
-
-        # THE FINAL FUNCTION TO UNLINK ALL LIGHTS WHEN QUITTING THE PROGRAM
-        def closeEvent(self, event):
-            global threadAction, httpServerInstance, httpServerRunning
-
-            # Always save window geometry on close (whether tray-minimizing or quitting)
-            self.saveWindowGeometry()
-
-            # If system tray is available, preference is on, and this isn't a force-quit, minimize to tray instead
-            if minimizeToTrayOnClose and hasattr(self, '_trayIcon') and self._trayIcon and not getattr(self, '_forceQuit', False):
-                # Save presets now so they persist even if the process is later killed
-                self._savePresetsQuick()
-                event.ignore()
-                self.hide()
-                self._trayIcon.showMessage("NeewerLux", "Minimized to system tray. Double-click to restore.",
-                                           QSystemTrayIcon.Information, 2000)
-                return
-
-            # STOP HTTP SERVER IF RUNNING
-            if hasattr(self, '_trayIcon') and self._trayIcon:
-                self._trayIcon.hide()
-
-            if httpServerRunning and httpServerInstance:
-                try:
-                    httpServerInstance.shutdown()
-                    httpServerInstance.server_close()
-                except Exception:
-                    pass
-                httpServerRunning = False
-
-            # STOP ANY RUNNING ANIMATION BEFORE SHUTTING DOWN
-            if animationRunning:
-                stopAnimation()
-
-            # WAIT UNTIL THE BACKGROUND THREAD SETS THE threadAction FLAG TO finished SO WE CAN UNLINK THE LIGHTS
-            _quit_deadline = time.time() + 10  # give the thread 10 seconds max
-            while threadAction != "finished": # wait until the background thread has a chance to terminate
-                if time.time() > _quit_deadline:
-                    printDebugString("Background thread did not finish in time — forcing exit")
-                    break
-                printDebugString("Waiting for the background thread to terminate...")
-                threadAction = "quit" # make sure to tell the thread to quit again (if it missed it the first time)
-                time.sleep(2)
-
-            if rememberPresetsOnExit == True:
-                printDebugString("You asked NeewerLux to save the custom parameters on exit, so we will do that now...")
-                customPresetsToWrite = [] # the list of custom presets to write to file
-
-                # SAVE THE TOTAL NUMBER OF PRESETS SO WE KNOW HOW MANY TO LOAD NEXT TIME
-                customPresetsToWrite.append("numOfPresets=" + str(numOfPresets))
-
-                # CHECK EVERY SINGLE CUSTOM PRESET AGAINST THE "DEFAULT" LIST, AND IF IT'S DIFFERENT, THEN LOG THAT ONE
-                for i in range(numOfPresets):
-                    if customLightPresets[i] != defaultLightPresets[i]:
-                        customPresetsToWrite.append(customPresetToString(i))
-
-                # SAVE ANY CUSTOM PRESET NAMES
-                for idx, name in presetNames.items():
-                    if name:
-                        customPresetsToWrite.append("presetName" + str(idx) + "=" + name)
-
-                # Determine if there's anything non-default to save
-                hasNonDefaultContent = len(customPresetsToWrite) > 1 or numOfPresets != 8
-
-                if hasNonDefaultContent: # if there are altered presets, names, or a non-default preset count
-                    createLightPrefsFolder() # create the light_prefs folder if it doesn't exist
-
-                    # WRITE THE PREFERENCES FILE
-                    with open(customLightPresetsFile, mode="w", encoding="utf-8") as prefsFileToWrite:
-                        prefsFileToWrite.write("\n".join(customPresetsToWrite))
-
-                    printDebugString("Exported custom presets to " + customLightPresetsFile)
-                else:
-                    if os.path.exists(customLightPresetsFile):
-                        printDebugString("There were no changed custom presets, so we're deleting the custom presets file!")
-                        os.remove(customLightPresetsFile) # if there are no presets to save, then delete the custom presets file
-                      
-            # Keep in mind, this is broken into 2 separate "for" loops, so we save all the light params FIRST, then try to unlink from them
-            if rememberLightsOnExit == True:
-                printDebugString("You asked NeewerLux to save the last used light parameters on exit, so we will do that now...")
-
-                for a in range(len(availableLights)):
-                    printDebugString("Saving last used parameters for light #" + str(a + 1) + " (" + str(a + 1) + " of " + str(len(availableLights)) + ")")
-                    saveLightPrefs(a)
-
-            # THE THREAD HAS TERMINATED, NOW CONTINUE...
-            printDebugString("We will now attempt to unlink from the lights...")
-            self.statusBar.showMessage("Quitting program - unlinking from lights...")
-            QApplication.processEvents() # force the status bar to update
-
-            asyncioEventLoop.run_until_complete(parallelAction("disconnect", [-1])) # disconnect from all lights in parallel
-
-            printDebugString("Closing the program NOW")
-            event.accept()
-
-            # Force-kill the process so the CMD window closes too
-            # (background threads like HTTP server would keep it alive otherwise)
-            import os as _os
-            _os._exit(0)
-
-        def saveCustomPresetDialog(self, numOfPreset):
-            if (QApplication.keyboardModifiers() & Qt.AltModifier) == Qt.AltModifier: # if you have the ALT key held down
-                customLightPresets[numOfPreset] = defaultLightPresets[numOfPreset] # then restore the default for this preset
-                presetNames.pop(numOfPreset, None) # also clear the custom name
-                # Change the button display back to "PRESET GLOBAL"
-                if numOfPreset < len(self.presetButtons):
-                    self.presetButtons[numOfPreset].markCustom(numOfPreset, -1)
-            else:
-                if len(availableLights) == 0: # if we don't have lights, then we can't save a preset!
-                    errDlg = QMessageBox(self)
-                    errDlg.setWindowTitle("Can't Save Preset!")
-                    errDlg.setText("You can't save a custom preset at the moment because you don't have any lights set up yet.  To save a custom preset, connect a light to NeewerLux first.")
-                    errDlg.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
-                    errDlg.setIcon(QMessageBox.Warning)
-                    errDlg.exec()
-                else: # we have lights, we can do it!
-                    selectedLights = self.selectedLights() # get the currently selected lights
-
-                    saveDlg = QMessageBox(self)
-                    saveDlg.setWindowTitle("Save a Custom Preset")
-                    saveDlg.setTextFormat(Qt.TextFormat.RichText)
-                    saveDlg.setText("Would you like to save a <em>Global</em> or <em>Snapshot</em> preset for preset " + str(numOfPreset + 1) + "?" + "<hr>"
-                                    "A <em>Global Preset</em> saves only the currently set global parameters (mode, hue, color temperature, brightness, etc.) and applies that global preset to all the lights that are currently selected.<br><br>"
-                                    "A <em>Snapshot Preset</em> saves the currently set parameters for each light individually, allowing you to recall more complex lighting setups.  You can also either set a <em>snapshot preset</em> for a series of selected lights (you have to select 1 or more lights for this option), or all the currently available lights.  If you save a <em>snapshot preset</em> of a series of selected lights, it will only apply the settings for those specific lights.")
-                    saveDlg.addButton(" Global Preset ", QMessageBox.ButtonRole.YesRole)
-                    saveDlg.addButton(" Snapshot Preset - All Lights ", QMessageBox.ButtonRole.YesRole)
-
-                    selectedLightsQuestion = 0
-
-                    if selectedLights != []:
-                        saveDlg.addButton(" Snapshot Preset - Selected Lights ", QMessageBox.ButtonRole.YesRole)
-                        selectedLightsQuestion = 1
-                    
-                    saveDlg.addButton(" Cancel ", QMessageBox.ButtonRole.RejectRole)           
-                    saveDlg.setIcon(QMessageBox.Question)
-
-                    clickedButton = saveDlg.exec()
-                    
-                    if clickedButton == 0: # save a "Global" preset
-                        saveCustomPreset("global", numOfPreset)
-                    elif clickedButton == 1: # save a "Snapshot" preset with all lights
-                        saveCustomPreset("snapshot", numOfPreset)
-                    elif clickedButton == 2: # save a "Snapshot" preset with only the selected lights
-                        saveCustomPreset("snapshot", numOfPreset, selectedLights)
-                        
-                    if clickedButton != (2 + selectedLightsQuestion): # if we didn't cancel out, then mark that button as being "custom"
-                        # Prompt for a name
-                        currentName = presetNames.get(numOfPreset, "")
-                        newName, accepted = QInputDialog.getText(self, "Preset Name",
-                            "Enter a name for preset " + str(numOfPreset + 1) + " (leave blank for default):",
-                            text=currentName)
-                        if accepted:
-                            if newName.strip():
-                                presetNames[numOfPreset] = newName.strip()
-                            else:
-                                presetNames.pop(numOfPreset, None)
-
-                        if numOfPreset < len(self.presetButtons):
-                            name = presetNames.get(numOfPreset, "")
-                            self.presetButtons[numOfPreset].markCustom(numOfPreset, clickedButton, presetName=name)
-
-                        # Persist presets to disk immediately so HTTP/web UI can use them
-                        self._savePresetsQuick()
-
-        def highlightLightsForSnapshotPreset(self, numOfPreset, exited = False):
-            global lastSelection
-
-            if exited == False: # if we're entering a snapshot preset, then highlight the affected lights in green
-                toolTip = customPresetInfoBuilder(numOfPreset)
-
-                # LOAD A NEWLY GENERATED TOOLTIP FOR EVERY HOVER
-                if numOfPreset < len(self.presetButtons):
-                    self.presetButtons[numOfPreset].setToolTip(toolTip)
-
-                lightsToHighlight = self.checkForSnapshotPreset(numOfPreset)
-                
-                if lightsToHighlight != []:
-                    lastSelection = self.selectedLights()
-                    # Block signals to prevent clearSelection from triggering selectionChanged → tab switch
-                    self.lightTable.blockSignals(True)
-                    self.lightTable.clearSelection()
-                    self.lightTable.blockSignals(False)
-
-                    for a in range(len(lightsToHighlight)):
-                        for b in range(4):
-                            self.lightTable.item(lightsToHighlight[a], b).setBackground(QColor(76, 175, 80, 80))
-            else: # if we're exiting a snapshot preset, then reset the color of the affected lights
-                lightsToHighlight = self.checkForSnapshotPreset(numOfPreset)
-                
-                if lightsToHighlight != []:
-                    self.lightTable.blockSignals(True)
-                    self.selectRows(lastSelection)
-                    self.lightTable.blockSignals(False)
-
-                    for a in range(len(lightsToHighlight)):
-                        for b in range(4):
-                            self.lightTable.item(lightsToHighlight[a], b).setData(Qt.BackgroundRole, None)
-
-        def checkForSnapshotPreset(self, numOfPreset):
-            if customLightPresets[numOfPreset][0][0] != -1: # if the value is not -1, then we most likely have a snapshot preset
-                lightsToHighlight = []
-                
-                for a in range(len(customLightPresets[numOfPreset])): # check each entry in the preset for matching lights
-                    currentLight = returnLightIndexesFromMacAddress(customLightPresets[numOfPreset][a][0])
-
-                    if currentLight != []: # if we have a match, add it to the list of lights to highlight
-                        lightsToHighlight.append(currentLight[0])
-
-                return lightsToHighlight
-            else:
-                return [] # if we don't have a snapshot preset, then just return an empty list (no lights directly affected)
-
-        # SET UP THE GUI BASED ON COMMAND LINE ARGUMENTS
-        def setUpGUI(self, **modeArgs):
-            if modeArgs["colorMode"] == "CCT":
-                self.ColorModeTabWidget.setCurrentIndex(0)
-
-                self.Slider_CCT_Hue.setValue(modeArgs["temp"])
-                self.Slider_CCT_Bright.setValue(modeArgs["brightness"])
-
-                self.computeValueCCT()
-            elif modeArgs["colorMode"] == "HSI":
-                self.ColorModeTabWidget.setCurrentIndex(1)
-
-                self.Slider_HSI_1_H.setValue(modeArgs["hue"])
-                self.Slider_HSI_2_S.setValue(modeArgs["sat"])
-                self.Slider_HSI_3_L.setValue(modeArgs["brightness"])
-
-                self.computeValueHSI()
-            elif modeArgs["colorMode"] == "ANM":
-                self.ColorModeTabWidget.setCurrentIndex(2)
-
-                self.Slider_ANM_Brightness.setValue(modeArgs["brightness"])
-                self.computeValueANM(modeArgs["scene"])
-except NameError:
-    pass # could not load the GUI, but we have already logged an error message
+def savePresetsToFile():
+    """Write the custom presets and their names to disk.
+
+    Deletes the file when nothing differs from the factory presets, which is what
+    makes a reset persist instead of being re-seeded on the next launch.
+    """
+    if not rememberPresetsOnExit:
+        return
+
+    try:
+        customPresetsToWrite = ["numOfPresets=" + str(numOfPresets)]
+
+        for i in range(numOfPresets):
+            if customLightPresets[i] != defaultLightPresets[i]:
+                customPresetsToWrite.append(customPresetToString(i))
+
+        for idx, name in presetNames.items():
+            if name:
+                customPresetsToWrite.append("presetName" + str(idx) + "=" + name)
+
+        if len(customPresetsToWrite) > 1 or numOfPresets != 8:
+            createLightPrefsFolder()
+
+            with open(customLightPresetsFile, mode="w", encoding="utf-8") as f:
+                f.write("\n".join(customPresetsToWrite))
+
+            printDebugString("Saved presets to " + customLightPresetsFile)
+        elif os.path.exists(customLightPresetsFile):
+            os.remove(customLightPresetsFile)
+    except OSError as e:
+        printDebugString("Error saving presets: " + str(e))
 
 def setUpAsyncio():
     global asyncioEventLoop
@@ -3680,10 +585,7 @@ def recallCustomPreset(numOfPreset, updateGUI=True, loop=None):
     if animationRunning:
         stopAnimation()
         try:
-            if mainWindow is not None:
-                mainWindow.animPlayButton.setEnabled(True)
-                mainWindow.animStopButton.setEnabled(False)
-                mainWindow.animStatusLabel.setText("Stopped")
+            pass # the GUI notification that lived here is gone
         except Exception:
             pass
 
@@ -3693,8 +595,7 @@ def recallCustomPreset(numOfPreset, updateGUI=True, loop=None):
         if customLightPresets[numOfPreset][0][0] == -1: # we're looking at a global preset, so set the light(s) up accordingly
             
             if updateGUI == True: # if we are in the GUI
-                if mainWindow.selectedLights() == []: # and no lights are selected in the light selector
-                    mainWindow.lightTable.selectAll() # select all of the lights available
+                if True: # and no lights are selected in the light selector
                     time.sleep(0.2)
             
             if customLightPresets[numOfPreset][0][1][0] == 5: # the preset is in CCT mode
@@ -3703,7 +604,7 @@ def recallCustomPreset(numOfPreset, updateGUI=True, loop=None):
                 p_temp = customLightPresets[numOfPreset][0][1][2]
 
                 if updateGUI == True:
-                    if mainWindow is not None: mainWindow.setUpGUI(colorMode=p_colorMode, brightness=p_brightness, temp=p_temp)
+                    pass # the GUI notification that lived here is gone
                 else:
                     computedValue = calculateByteString(True, colorMode=p_colorMode, brightness=p_brightness, temp=p_temp)
             elif customLightPresets[numOfPreset][0][1][0] == 4: # the preset is in HSI mode
@@ -3715,7 +616,7 @@ def recallCustomPreset(numOfPreset, updateGUI=True, loop=None):
                 p_int = customLightPresets[numOfPreset][0][1][1]
 
                 if updateGUI == True:
-                    if mainWindow is not None: mainWindow.setUpGUI(colorMode=p_colorMode, hue=p_hue, sat=p_sat, brightness=p_int)
+                    pass # the GUI notification that lived here is gone
                 else:
                     computedValue = calculateByteString(True, colorMode=p_colorMode, HSI_H=p_hue, HSI_S=p_sat, HSI_I=p_int)
             elif customLightPresets[numOfPreset][0][1][0] == 6: # the preset is in ANM/SCENE mode
@@ -3724,7 +625,7 @@ def recallCustomPreset(numOfPreset, updateGUI=True, loop=None):
                 p_scene = customLightPresets[numOfPreset][0][1][2]
 
                 if updateGUI == True:
-                    if mainWindow is not None: mainWindow.setUpGUI(colorMode=p_colorMode, brightness=p_brightness, scene=p_scene)
+                    pass # the GUI notification that lived here is gone
                 else:
                     computedValue = calculateByteString(True, colorMode=p_colorMode, brightness=p_brightness, scene=p_scene)
 
@@ -3771,8 +672,6 @@ def recallCustomPreset(numOfPreset, updateGUI=True, loop=None):
         if updateGUI == True:
             lastSelection = [] # clear the last selection if you've clicked on a snapshot preset (which, if we're here, you did)
 
-            mainWindow.lightTable.setFocus() # set the focus to the light table, in order to show which rows are selected
-            mainWindow.selectRows(changedLights) # select those rows affected by the lights above
 
         # Always use the threadAction approach, this is safe from both GUI and HTTP threads
         threadAction = "send|" + "|".join(map(str, changedLights))
@@ -4001,8 +900,7 @@ def printDebugString(theString):
     # Emit to GUI log tab if available
     if enableLogTab:
         try:
-            if mainWindow is not None:
-                mainWindow._logSignal.emit(logLine)
+            pass # the GUI notification that lived here is gone
         except Exception:
             pass
 
@@ -4339,11 +1237,11 @@ async def connectToLight(selectedLight, updateGUI=True):
                     if currentAttempt < maxNumOfAttempts:
                         lightIdx = returnLightIndexesFromMacAddress(lightMAC)[0]
                         if currentAttempt == 1:
+                            pass # the GUI notification that lived here is gone
                             # First attempt failures are common (BLE adapter settling), show gentle status
-                            if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "", "Connecting..."], lightIdx)
                         else:
+                            pass # the GUI notification that lived here is gone
                             # Subsequent failures are worth reporting
-                            if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "NOT\nLINKED", "There was an error connecting to the light, trying again (Attempt " + str(currentAttempt + 1) + " of " + str(maxNumOfAttempts) + ")..."], lightIdx)
                 else:
                     returnValue = False # if we're in CLI mode, and there is an error connecting to the light, return False
 
@@ -4362,12 +1260,12 @@ async def connectToLight(selectedLight, updateGUI=True):
             printDebugString("Successful link on light [" + lightName + "] " + returnMACname() + " " + lightMAC)
 
             if updateGUI == True:
-                if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "LINKED", "Waiting to send..."], returnLightIndexesFromMacAddress(lightMAC)[0]) # if it's successful, show that in the table
+                pass # the GUI notification that lived here is gone
             else:
                 returnValue = True  # if we're in CLI mode, and there is no error connecting to the light, return True
         else:
             if updateGUI == True:
-                if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "NOT\nLINKED", "There was an error connecting to the light"], returnLightIndexesFromMacAddress(lightMAC)[0]) # there was an issue connecting this specific light to Bluetooh, so show that
+                pass # the GUI notification that lived here is gone
 
             returnValue = False # the light is not connected
 
@@ -4463,7 +1361,7 @@ async def disconnectFromLight(selectedLight, updateGUI=True):
         try:
             if not availableLights[selectedLight][1].is_connected: # if the current light is NOT connected, then we're good
                 if updateGUI == True: # if we're using the GUI, update the display (if we're waiting)
-                    if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "NOT\nLINKED", "Light disconnected!"], selectedLight) # show the new status in the table
+                    pass # the GUI notification that lived here is gone
                 else: # if we're not, then indicate that we're good
                     returnValue = True # if we're in CLI mode, then return False if there is an error disconnecting
 
@@ -4484,7 +1382,7 @@ async def writeToLight(selectedLights=0, updateGUI=True, useGlobalValue=True):
     try:
         if updateGUI == True:
             if selectedLights == 0:
-                selectedLights = mainWindow.selectedLights() # get the list of currently selected lights from the GUI table
+                selectedLights = [-1] # get the list of currently selected lights from the GUI table
         else:
             if type(selectedLights) is int: # if we specify an integer-based index
                 selectedLights = [selectedLights] # convert asked-for light to list
@@ -4516,7 +1414,7 @@ async def writeToLight(selectedLights=0, updateGUI=True, useGlobalValue=True):
                                 clampedTemp = clampCCTForLight(int(selectedLights[a]), currentSendValue[4])
                                 if clampedTemp is None:
                                     if updateGUI:
-                                        if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "", "CCT temp out of range (ignored)"], int(selectedLights[a]))
+                                        pass # the GUI notification that lived here is gone
                                     continue  # skip this light
                                 elif clampedTemp != currentSendValue[4]:
                                     currentSendValue = list(currentSendValue)
@@ -4547,7 +1445,6 @@ async def writeToLight(selectedLights=0, updateGUI=True, useGlobalValue=True):
                                         currentSendValue = convertedVal  # for status display
                                     elif updateGUI == True:
                                         modeName = "HSI" if currentSendValue[1] == 134 else "ANM/SCENE"
-                                        if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "", modeName + " mode ignored (CCT-only)"], int(selectedLights[a]))
                             else: # we're using a "newer" Neewer light, so just send the original calculated value
                                 await availableLights[int(selectedLights[a])][1].write_gatt_char(setLightUUID, bytearray(currentSendValue), False)
 
@@ -4555,19 +1452,17 @@ async def writeToLight(selectedLights=0, updateGUI=True, useGlobalValue=True):
                                 # if we're not looking at an old light, or if we are, we're not in either HSI or ANM modes, then update the status of that light
                                 if not (availableLights[(int(selectedLights[a]))][5] == True and (currentSendValue[1] == 134 or currentSendValue[1] == 136)):
                                     if currentSendValue[1] != 129: # if we're not turning the light on or off
-                                        if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "", updateStatus(True, currentSendValue)], int(selectedLights[a]))
+                                        pass # the GUI notification that lived here is gone
                                     else: # we ARE turning the light on or off
                                         if currentSendValue[3] == 1: # we turned the light on
                                             availableLights[int(selectedLights[a])][6] = True # toggle the "light on" parameter of this light to ON
 
-                                            changeStatus = mainWindow.returnTableInfo(selectedLights[a], 2).replace("STBY", "ON") if mainWindow is not None else ""
-                                            if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", changeStatus, "Light turned on"], int(selectedLights[a]))
+                                            changeStatus = ""
 
                                         else: # we turned the light off
                                             availableLights[int(selectedLights[a])][6] = False # toggle the "light on" parameter of this light to OFF
 
-                                            changeStatus = mainWindow.returnTableInfo(selectedLights[a], 2).replace("ON", "STBY") if mainWindow is not None else ""
-                                            if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", changeStatus, "Light turned off\nA long period of inactivity may require a re-link to the light"], int(selectedLights[a]))
+                                            changeStatus = ""
                             else:
                                 returnValue = True # we successfully wrote to the light
 
@@ -4575,10 +1470,10 @@ async def writeToLight(selectedLights=0, updateGUI=True, useGlobalValue=True):
                                 availableLights[selectedLights[a]][3] = currentSendValue # store the currenly sent value to recall later
                         except Exception as e:
                             if updateGUI == True:
-                                if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "", "Error Sending to light!"], int(selectedLights[a]))
+                                pass # the GUI notification that lived here is gone
                     else: # if there is no Bleak object associated with this light (otherwise, it's been found, but not linked)
                         if updateGUI == True:
-                            if mainWindow is not None: mainWindow._tableUpdateSignal.emit(["", "", "", "Light isn't linked yet, can't send to it"], int(selectedLights[a]))
+                            pass # the GUI notification that lived here is gone
                         else:
                             returnValue = 0 # the light is not linked, even though it *should* be if it gets to this point, so this is an odd error
 
@@ -4590,7 +1485,7 @@ async def writeToLight(selectedLights=0, updateGUI=True, useGlobalValue=True):
             await asyncio.sleep(0.05) # wait 1/20th of a second to give the Bluetooth bus a little time to recover
 
             if updateGUI == True:
-                selectedLights = mainWindow.selectedLights() # re-acquire the current list of selected lights
+                selectedLights = [-1] # re-acquire the current list of selected lights
     except Exception as e:
         printDebugString("There was an error communicating with light " + str(selectedLights[a] + 1) + " [" + availableLights[selectedLights[a]][0].name + "] " + returnMACname() + " " + availableLights[selectedLights[a]][0].address)
         print(e)
@@ -4662,7 +1557,7 @@ def workerThread(_loop):
 
     # A LIST OF LIGHTS THAT DON'T SEND POWER/CHANNEL STATUS
     lightsToNotCheckPower = ["NEEWER-RGB176"]
-    hasGUI = mainWindow is not None  # False in HTTP-only mode
+    hasGUI = False # the GUI is gone; these branches are dead and go with the module split
 
     if findLightsOnStartup == True: # if we're set to find lights at startup, then automatically set the thread to discovery mode
         threadAction = "discover"
@@ -4694,7 +1589,6 @@ def workerThread(_loop):
                     if threadAction == "": # if we're not sending, then update the light info... (check this before scanning each light)
                         if availableLights[a][1] != "": # if there is a Bleak object, then check to see if it's connected
                             if not availableLights[a][1].is_connected: # the light is disconnected, but we're reporting it isn't
-                                if hasGUI: mainWindow._tableUpdateSignal.emit(["", "", "NOT\nLINKED", "Light disconnected!"], a) # show the new status in the table
                                 availableLights[a][1] = "" # clear the Bleak object
 
                                 # Queue this light for auto-reconnect if enabled
@@ -4710,9 +1604,8 @@ def workerThread(_loop):
                                         _loop.run_until_complete(getLightChannelandPower(a)) # then check the power and light status of that light
                                     except Exception as e:
                                         printDebugString("Error reading power/channel for light " + str(a + 1) + ": " + str(e))
-                                    if hasGUI: mainWindow._tableUpdateSignal.emit(["", "", "LINKED\n" + availableLights[a][7][0] + " / ᴄʜ. " + str(availableLights[a][7][1]), "Waiting to send..."], a)
                                 else: # if the light we're scanning doesn't supply power or channel status, then just show "LINKED"
-                                    if hasGUI: mainWindow._tableUpdateSignal.emit(["", "", "LINKED", "Waiting to send..."], a)
+                                    pass # the GUI notification that lived here is gone
                         else:
                             # Bleak object is empty - light was previously cleared; check cooldown for retry
                             if autoReconnectOnDisconnect and a not in reconnectCooldown:
@@ -4734,9 +1627,7 @@ def workerThread(_loop):
                         allDisconnectedSince += 1
                         if allDisconnectedSince >= 2:  # after 2 consecutive all-disconnected cycles, rescan
                             printDebugString("Auto-reconnect: all lights disconnected (likely wake from sleep) - rescanning...")
-                            if hasGUI: mainWindow.statusBar.showMessage("Woke from sleep - rescanning for lights...")
                             _loop.run_until_complete(findDevices())
-                            if hasGUI: mainWindow.updateLights()
                             allDisconnectedSince = 0
                     else:
                         allDisconnectedSince = 0
@@ -4746,7 +1637,7 @@ def workerThread(_loop):
                         if threadAction == "quit":
                             break
                         if lightIdx < len(availableLights):
-                            if hasGUI: mainWindow._tableUpdateSignal.emit(["", "", "NOT\nLINKED", "Auto-reconnecting..."], lightIdx)
+                            pass # the GUI notification that lived here is gone
 
                     try:
                         if threadAction != "quit":
@@ -4763,7 +1654,6 @@ def workerThread(_loop):
             threadAction = _loop.run_until_complete(findDevices()) # add new lights to the main array
 
             if threadAction != "quit":
-                if hasGUI: mainWindow.updateLights() # tell the GUI to update its list of available lights
 
                 if autoConnectToLights == True: # if we're set to automatically link to the lights on startup, then do it here
                     #for a in range(len(availableLights)):
@@ -4780,7 +1670,7 @@ def workerThread(_loop):
 
                 threadAction = ""
         elif threadAction == "connect":
-            selectedLights = mainWindow.selectedLights() if hasGUI else [-1] # get the list of currently selected lights
+            selectedLights = [-1] # get the list of currently selected lights
 
             if threadAction != "quit": # if we're not supposed to quit, then try to connect to the light(s)
                 _loop.run_until_complete(parallelAction("connect", selectedLights)) # connect to each *selected* light in parallel
@@ -4802,10 +1692,8 @@ def workerThread(_loop):
             printDebugString("Leaving send mode and going back to background thread")
             # Update the Status column in the light table so the user sees current values
             try:
-                if mainWindow is not None:
-                    for idx in lightIndices:
                         if idx < len(availableLights) and availableLights[idx][3] is not None:
-                            if hasGUI: mainWindow._tableUpdateSignal.emit(["", "", "", updateStatus(True, availableLights[idx][3])], idx)
+                            pass # the GUI notification that lived here is gone
             except Exception:
                 pass
             threadAction = ""
@@ -5072,10 +1960,7 @@ def processHTMLCommands(paramsList, loop):
     if paramsList[3] not in ("animate", "stop_animate", "list_animations") and animationRunning:
         stopAnimation()
         try:
-            if mainWindow is not None:
-                mainWindow.animPlayButton.setEnabled(True)
-                mainWindow.animStopButton.setEnabled(False)
-                mainWindow.animStatusLabel.setText("Stopped")
+            pass # the GUI notification that lived here is gone
         except Exception:
             pass
 
@@ -5097,7 +1982,7 @@ def processHTMLCommands(paramsList, loop):
         if 0 <= presetIdx < numOfPresets:
             saveCustomPreset("snapshot", presetIdx)
             try:
-                if mainWindow is not None: mainWindow._savePresetsQuick()
+                pass # the GUI notification that lived here is gone
             except Exception:
                 pass
             printDebugString("HTTP: Saved snapshot preset " + str(presetIdx + 1))
@@ -5107,8 +1992,7 @@ def processHTMLCommands(paramsList, loop):
         defaultLightPresets.append(getDefaultPreset(numOfPresets - 1))
         customLightPresets.append(getDefaultPreset(numOfPresets - 1))
         try:
-            if mainWindow is not None: mainWindow.createPresetButtons()
-            if mainWindow is not None: mainWindow._savePresetsQuick()
+            pass # the GUI notification that lived here is gone
         except Exception:
             pass
         printDebugString("HTTP: Added preset #" + str(numOfPresets))
@@ -5126,8 +2010,7 @@ def processHTMLCommands(paramsList, loop):
             presetNames.update(newNames)
             numOfPresets -= 1
             try:
-                if mainWindow is not None: mainWindow.createPresetButtons()
-                if mainWindow is not None: mainWindow._savePresetsQuick()
+                pass # the GUI notification that lived here is gone
             except Exception:
                 pass
             printDebugString("HTTP: Deleted preset " + str(presetIdx + 1))
@@ -5713,8 +2596,7 @@ def animationEngineThread(animation, loop, speedMultiplier=1.0, loopOverride=Non
             if now - lastGUIUpdate >= 1.0:
                 lastGUIUpdate = now
                 try:
-                    if mainWindow is not None:
-                        mainWindow.animStatusLabel.setText("Playing: " + animName + "\nFrame " + str(frameIndex + 1) + "/" + str(totalFrames))
+                    pass # the GUI notification that lived here is gone
                 except Exception:
                     pass
 
@@ -5815,10 +2697,7 @@ def animationEngineThread(animation, loop, speedMultiplier=1.0, loopOverride=Non
         preAnimationStates = {}
 
     try:
-        if mainWindow is not None:
-            mainWindow.animStatusLabel.setText("Stopped")
-            mainWindow.animPlayButton.setEnabled(True)
-            mainWindow.animStopButton.setEnabled(False)
+        pass # the GUI notification that lived here is gone
     except Exception:
         pass
 
@@ -6221,18 +3100,13 @@ class NLPythonServer(BaseHTTPRequestHandler):
             if "/NeewerLite-Python/" in self.path:
                 self.path = self.path.replace("/NeewerLite-Python/", "/NeewerLux/")
 
-            if not acceptableURL in self.path: # serve the modern web dashboard
-                if getWebDashboardHTML is not None:
-                    self.send_response(200)
-                    self._send_cors_headers()
-                    self.send_header("Content-Type", "text/html;charset=UTF-8")
-                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-                    self.end_headers()
-                    self.wfile.write(getWebDashboardHTML(version=NEEWERLUX_VERSION).encode("utf-8"))
-                else:
-                    self.send_response(302)
-                    self.send_header('Location', acceptableURL)
-                    self.end_headers()
+            if not acceptableURL in self.path: # serve the web dashboard
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "text/html;charset=UTF-8")
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(getWebDashboardHTML(version=NEEWERLUX_VERSION).encode("utf-8"))
 
                 return
             else: # if the URL contains "/NeewerLux/doAction?" then it's a valid URL
@@ -6634,8 +3508,7 @@ class NLPythonServer(BaseHTTPRequestHandler):
                     resultData = {"success": True, "action": "create", "animation": animData["name"]}
                     # Refresh GUI list if available
                     try:
-                        if mainWindow is not None:
-                            mainWindow.animRefreshList()
+                        pass # the GUI notification that lived here is gone
                     except Exception:
                         pass
             elif action == "status":
@@ -6988,9 +3861,10 @@ if __name__ == '__main__':
         loadCustomPresets(customPresetsSource) # if there's a custom mapping for presets, then load that into memory
 
     setUpAsyncio() # set up the asyncio loop
-    cmdReturn = [True] # initially set to show the GUI interface over the CLI interface
+    # With no arguments there is no window to show, so run the server: it is the interface.
+    cmdReturn = ["HTTP", True]
 
-    if len(sys.argv) > 1: # if we have more than 1 argument on the command line (the script itself is argument 1), then process switches
+    if len(sys.argv) > 1: # process switches when any were given
         cmdReturn = processCommands()
         printDebug = cmdReturn[1] # if we use the --quiet option, then don't show debug strings in the console
 
@@ -6998,92 +3872,94 @@ if __name__ == '__main__':
             doAnotherInstanceCheck() # check to see if another instance is running, and if it is, then error out and quit
 
         # START HTTP SERVER HERE AND SIT IN THIS LOOP UNTIL THE END
-        if cmdReturn[0] == "HTTP":
-            doAnotherInstanceCheck() # check to see if another instance is running, and if it is, then error out and quit
 
-            # Load animations and light aliases for HTTP access
-            loadAllAnimations()
-            loadLightAliases()
+    if cmdReturn[0] == "HTTP":
+        doAnotherInstanceCheck() # check to see if another instance is running, and if it is, then error out and quit
 
-            # Start a worker thread to process BLE operations (discover, connect, send, etc.)
-            # Without this, threadAction commands from processHTMLCommands would never be picked up.
-            httpWorker = threading.Thread(target=workerThread, args=(asyncioEventLoop,), name="workerThread", daemon=True)
-            httpWorker.start()
+        # Load animations and light aliases for HTTP access
+        loadAllAnimations()
+        loadLightAliases()
 
-            webServer = ThreadingHTTPServer(("", httpPort), NLPythonServer)
+        # Start a worker thread to process BLE operations (discover, connect, send, etc.)
+        # Without this, threadAction commands from processHTMLCommands would never be picked up.
+        httpWorker = threading.Thread(target=workerThread, args=(asyncioEventLoop,), name="workerThread", daemon=True)
+        httpWorker.start()
 
+        webServer = ThreadingHTTPServer(("", httpPort), NLPythonServer)
+
+        try:
+            printDebugString("Starting the HTTP Server on Port " + str(httpPort) + "...")
+            printDebugString("-------------------------------------------------------------------------------------")
+
+            # start the HTTP server and wait for requests
+            webServer.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            printDebugString("Stopping the HTTP Server...")
+            webServer.server_close()
+
+            # Stop the worker thread and disconnect from lights
+            printDebugString("Attempting to unlink from lights...")
+            threadAction = "quit"
+            time.sleep(1)  # give worker thread time to process quit
             try:
-                printDebugString("Starting the HTTP Server on Port " + str(httpPort) + "...")
-                printDebugString("-------------------------------------------------------------------------------------")
-
-                # start the HTTP server and wait for requests
-                webServer.serve_forever()
-            except KeyboardInterrupt:
-                pass
-            finally:
-                printDebugString("Stopping the HTTP Server...")
-                webServer.server_close()
-
-                # Stop the worker thread and disconnect from lights
-                printDebugString("Attempting to unlink from lights...")
-                threadAction = "quit"
-                time.sleep(1)  # give worker thread time to process quit
-                try:
-                    asyncioEventLoop.run_until_complete(parallelAction("disconnect", [-1], False))
-                except RuntimeError:
-                    pass  # event loop may still be in use briefly
+                asyncioEventLoop.run_until_complete(parallelAction("disconnect", [-1], False))
+            except RuntimeError:
+                pass  # event loop may still be in use briefly
            
-            printDebugString("Closing the program NOW")
-            singleInstanceUnlockandQuit(0) # delete the lock file and quit out
+        printDebugString("Closing the program NOW")
+        singleInstanceUnlockandQuit(0) # delete the lock file and quit out
 
-        if cmdReturn[0] == "LIST":
-            doAnotherInstanceCheck() # check to see if another instance is running, and if it is, then error out and quit
+    if cmdReturn[0] == "LIST":
+        doAnotherInstanceCheck() # check to see if another instance is running, and if it is, then error out and quit
 
-            print("NeewerLux " + NEEWERLUX_VERSION + " — based on NeewerLite-Python 0.12d by Zach Glenwright / NeewerLite by Xu Lian")
-            print("Searching for nearby Neewer lights...")
-            asyncioEventLoop.run_until_complete(findDevices())
+        print("NeewerLux " + NEEWERLUX_VERSION + " — based on NeewerLite-Python 0.12d by Zach Glenwright / NeewerLite by Xu Lian")
+        print("Searching for nearby Neewer lights...")
+        asyncioEventLoop.run_until_complete(findDevices())
 
-            if len(availableLights) > 0:
-                print()
+        if len(availableLights) > 0:
+            print()
 
-                if len(availableLights) == 1: # we only found one
-                    print("We found 1 Neewer light on the last search.")
-                else: # we found more than one
-                    print("We found " + str(len(availableLights)) + " Neewer lights on the last search.")
+            if len(availableLights) == 1: # we only found one
+                print("We found 1 Neewer light on the last search.")
+            else: # we found more than one
+                print("We found " + str(len(availableLights)) + " Neewer lights on the last search.")
 
-                print()
+            print()
 
-                if platform.system() == "Darwin": # if we're on MacOS, then we display the GUID instead of the MAC address
-                    addressCharsAllowed = 36 # GUID addresses are 36 characters long
-                    addressString = "GUID (MacOS)"
-                else:
-                    addressCharsAllowed = 17 # MAC addresses are 17 characters long
-                    addressString = "MAC Address"
-
-                nameCharsAllowed = 79 - addressCharsAllowed # the remaining space is to display the light name
-
-                # PRINT THE HEADERS
-                print(formatStringForConsole("Custom Name (Light Type)", nameCharsAllowed) + \
-                      " " + \
-                      formatStringForConsole(addressString, addressCharsAllowed))
-
-                # PRINT THE SEPARATORS
-                print(formatStringForConsole("-", nameCharsAllowed) + " " + formatStringForConsole("-", addressCharsAllowed))
-
-                # PRINT THE LIGHTS
-                for a in range(len(availableLights)):
-                    lightName = availableLights[a][2] + "(" + availableLights[a][0].name + ")"
-
-                    print(formatStringForConsole(lightName, nameCharsAllowed) + " " + \
-                          formatStringForConsole(availableLights[a][0].address, addressCharsAllowed))
-
-                    print(formatStringForConsole(" > RSSI: " + _get_light_rssi(availableLights[a]) + "dBm", nameCharsAllowed))
+            if platform.system() == "Darwin": # if we're on MacOS, then we display the GUID instead of the MAC address
+                addressCharsAllowed = 36 # GUID addresses are 36 characters long
+                addressString = "GUID (MacOS)"
             else:
-                print("We did not find any Neewer lights on the last search.")
+                addressCharsAllowed = 17 # MAC addresses are 17 characters long
+                addressString = "MAC Address"
 
-            singleInstanceUnlockandQuit(0) # delete the lock file and quit out
+            nameCharsAllowed = 79 - addressCharsAllowed # the remaining space is to display the light name
 
-        printDebugString(" > Launch GUI: " + str(cmdReturn[0]))
+            # PRINT THE HEADERS
+            print(formatStringForConsole("Custom Name (Light Type)", nameCharsAllowed) + \
+                  " " + \
+                  formatStringForConsole(addressString, addressCharsAllowed))
+
+            # PRINT THE SEPARATORS
+            print(formatStringForConsole("-", nameCharsAllowed) + " " + formatStringForConsole("-", addressCharsAllowed))
+
+            # PRINT THE LIGHTS
+            for a in range(len(availableLights)):
+                lightName = availableLights[a][2] + "(" + availableLights[a][0].name + ")"
+
+                print(formatStringForConsole(lightName, nameCharsAllowed) + " " + \
+                      formatStringForConsole(availableLights[a][0].address, addressCharsAllowed))
+
+                print(formatStringForConsole(" > RSSI: " + _get_light_rssi(availableLights[a]) + "dBm", nameCharsAllowed))
+        else:
+            print("We did not find any Neewer lights on the last search.")
+
+        singleInstanceUnlockandQuit(0) # delete the lock file and quit out
+
+    # EVERYTHING BELOW IS THE ONE-SHOT CLI PATH
+    if len(sys.argv) > 1:
         printDebugString(" > Show Debug Strings on Console: " + str(cmdReturn[1]))
 
         printDebugString(" > Mode: " + cmdReturn[3])
@@ -7112,111 +3988,8 @@ if __name__ == '__main__':
                 printDebugString(" > CLI >> ALL to send to all available Neewer lights found by Bluetooth")
                 printDebugString("-------------------------------------------------------------------------------------")
 
-    if cmdReturn[0] == True: # launch the GUI with the command-line arguments
-        if importError == 0:
-            try: # try to load the GUI
-                # Qt6 enables high-DPI scaling on its own, so there is nothing to opt into.
-                app = QApplication(sys.argv)
-                
-                if anotherInstance == True: # different than the CLI handling, the GUI needs to show a dialog box asking to quit or launch
-                    errDlg = QMessageBox()
-                    errDlg.setWindowTitle("Another Instance Running!")
-                    errDlg.setTextFormat(Qt.TextFormat.RichText)
-                    errDlg.setText("There is another instance of NeewerLux already running.&nbsp;Please close out of that instance first before trying to launch a new instance of the program.<br><br>If you are positive that you don't have any other instances running and you want to launch a new one anyway,&nbsp;click <em>Launch New Instance</em> below.&nbsp;Otherwise click <em>Quit</em> to quit out.")
-                    launchBtn = errDlg.addButton("Launch New Instance", QMessageBox.ButtonRole.YesRole)
-                    quitBtn = errDlg.addButton("Quit", QMessageBox.ButtonRole.RejectRole)
-                    errDlg.setDefaultButton(quitBtn)
-                    errDlg.setIcon(QMessageBox.Warning)
-
-                    errDlg.exec()
-
-                    if errDlg.clickedButton() == quitBtn:
-                        sys.exit(1)
-
-                mainWindow = MainWindow()
-
-                # SET UP GUI BASED ON COMMAND LINE ARGUMENTS
-                if len(cmdReturn) > 1:
-                    if cmdReturn[3] == "CCT": # set up the GUI in CCT mode with specified parameters (or default, if none)
-                        if mainWindow is not None: mainWindow.setUpGUI(colorMode=cmdReturn[3], temp=cmdReturn[4], brightness=cmdReturn[5])
-                    elif cmdReturn[3] == "HSI": # set up the GUI in HSI mode with specified parameters (or default, if none)
-                        if mainWindow is not None: mainWindow.setUpGUI(colorMode=cmdReturn[3], hue=cmdReturn[4], sat=cmdReturn[5], brightness=cmdReturn[6])
-                    elif cmdReturn[3] == "ANM": # set up the GUI in ANM mode with specified parameters (or default, if none)
-                        if mainWindow is not None: mainWindow.setUpGUI(colorMode=cmdReturn[3], scene=cmdReturn[4], brightness=cmdReturn[5])
-
-                mainWindow.show()
-                print("[TRACE] mainWindow.show() complete")
-                
-                # Restore saved window geometry and splitter sizes
-                mainWindow.restoreWindowGeometry()
-
-                # Sync Global Preferences tab with loaded prefs (checkboxes default
-                # to UI-defined values until this is called, causing glitches)
-                mainWindow.setupGlobalLightPrefsTab()
-
-                # Hide console window on launch if preference is set
-                if hideConsoleOnLaunch:
-                    hideConsoleWindow()
-                    if hasattr(mainWindow, '_consoleVisible'):
-                        mainWindow._consoleVisible = False
-                        if mainWindow._consoleAction:
-                            mainWindow._consoleAction.setText("Show Console")
-
-                # Auto-start HTTP server if preference is set
-                if httpAutoStart:
-                    mainWindow.toggleHTTPServer()
-
-                # LOAD SAVED ANIMATIONS AND POPULATE THE ANIMATION LIST
-                loadAllAnimations()
-                loadLightAliases()
-                print("[TRACE] loadAllAnimations() + loadLightAliases() complete")
-                mainWindow.animRefreshList()
-                print("[TRACE] animRefreshList() complete")
-
-                # START THE BACKGROUND THREAD
-                # Named guiWorker rather than workerThread: assigning to the latter here
-                # rebinds the module-level name from the function to this Thread object,
-                # so a second pass through would call a Thread and raise TypeError.
-                guiWorker = threading.Thread(target=workerThread, args=(asyncioEventLoop,), name="workerThread", daemon=True)
-                guiWorker.start()
-                print("[TRACE] workerThread started, entering event loop...")
-
-                ret = app.exec()
-                print("[TRACE] event loop exited with code " + str(ret))
-                singleInstanceUnlockandQuit(ret) # delete the lock file and quit out
-            except NameError as e:
-                import traceback
-                print("[CRASH] NameError during GUI startup:")
-                traceback.print_exc()
-            except Exception as e:
-                import traceback
-                print("[CRASH] Exception during GUI startup:")
-                traceback.print_exc()
-        else:
-            if importError == 1: # we can't load PySide6
-                print(" ===== CAN NOT FIND PYSIDE LIBRARY =====")
-                print(" You don't have PySide6 installed.  If you're only running NeewerLux from")
-                print(" a command-line (from a Raspberry Pi CLI for instance), or using the HTTP server, you don't need this package.")
-                print(" If you want to launch NeewerLux with the GUI, you need to install PySide6.")
-                print()
-                print(" To install PySide6, run either pip or pip3 from the command line:")
-                print("    pip install PySide6")
-                print("    pip3 install PySide6")
-                print()
-                print(" Or visit this website for more information:")
-                print("    https://pypi.org/project/PySide6/")
-            elif importError == 2: # we have PySide, but can't load the GUI file itself for some reason
-                print(" ===== COULD NOT LOAD/FIND GUI FILE =====")
-                print(" If you don't need to use the GUI, you are fine going without PySide6.")
-                print(" but using NeewerLux with the GUI requires PySide6.")
-                print()
-                print(" If you have already installed PySide6 but are still getting this error message,")
-                print(" Make sure you have the neewerlux_ui.py script in the same directory as NeewerLux.py")
-                print(" If you don't know where that file is, redownload the NeewerLux package from Github here:")
-                print("    https://github.com/poizenjam/NeewerLux/")
-
-                sys.exit(1) # quit out, we can't run the program without PySide or the GUI (for the GUI version, at least)
-    else: # don't launch the GUI, send command to a light/lights and quit out
+    # SEND THE COMMAND TO A LIGHT, THEN QUIT OUT
+    if cmdReturn[0] is not None:
         if len(cmdReturn) > 1:
             if cmdReturn[3] == "CCT": # calculate CCT bytestring
                 calculateByteString(colorMode=cmdReturn[3], temp=cmdReturn[4], brightness=cmdReturn[5])

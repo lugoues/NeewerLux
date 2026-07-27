@@ -2,6 +2,9 @@
 # NeewerLux PyInstaller spec file
 # Build with:  pyinstaller NeewerLux.spec
 # Produces:    dist/NeewerLux/  (--onedir mode)
+#
+# NeewerLux is a headless service: it serves the HTTP API and web dashboard and has
+# no GUI, so this builds a console application with no Qt in it.
 
 import sys
 from PyInstaller.utils.hooks import collect_all
@@ -22,15 +25,7 @@ a = Analysis(
     hiddenimports=[
         'bleak',
         'bleak.backends.winrt',
-        'neewerlux_ui',
-        'neewerlux_theme',
         'neewerlux_webui',
-        'neewerlux_anim_editor',
-        'PySide6',
-        'PySide6.QtWidgets',
-        'PySide6.QtCore',
-        'PySide6.QtGui',
-        'PySide6.QtSvg',
     ] + bleak_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -54,7 +49,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,           # No console window — GUI app
+    console=True,            # Headless service, so the console is the only output
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

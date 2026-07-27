@@ -65,15 +65,10 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           zip -r "NeewerLux-${VERSION}-Source.zip" \
             NeewerLux.py \
-            neewerlux_ui.py \
-            neewerlux_theme.py \
             neewerlux_webui.py \
-            neewerlux_anim_editor.py \
-            NeewerLux.bat \
             NeewerLux-HTTP.bat \
             pyproject.toml \
             uv.lock \
-            com.github.poizenjam.NeewerLux.desktop \
             com.github.poizenjam.NeewerLux.ico \
             com.github.poizenjam.NeewerLux.png \
             README.md \
