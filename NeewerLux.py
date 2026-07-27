@@ -6461,6 +6461,171 @@ class NLPythonServer(BaseHTTPRequestHandler):
                              "allowed to control your lights. Add that origin to the allowed origins list in Global "
                              "Preferences if you meant to permit it.")
         return False
+    def _acceptsJSONHeader(self):
+        """Read the Accept header and decide whether JSON is what the client wants.
+
+        Media types are case-insensitive and each range may carry a q value, so a
+        substring test gets this wrong twice over: it misses "Application/JSON" and it
+        picks JSON out of "application/json;q=0, text/html", where the client has said
+        JSON is precisely what it does not want.
+        """
+        try:
+            acceptHeader = self.headers.get("Accept", "")
+        except Exception:
+            return False # headers are unavailable, which happens on malformed requests
+
+        if acceptHeader.strip() == "":
+            return False
+
+        # Precedence, most specific first, per RFC 9110: an exact type beats a subtype
+        # wildcard, which beats */*. Taking the highest q across all matching ranges
+        # would let "application/*;q=1" override an explicit "application/json;q=0",
+        # which says the opposite of what the client asked for.
+        ranges = {}
+
+        for mediaRange in acceptHeader.split(","):
+            parts = [part.strip() for part in mediaRange.split(";")]
+            mediaType = parts[0].lower()
+
+            quality = 1.0
+            for parameter in parts[1:]:
+                if parameter.lower().startswith("q="):
+                    try:
+                        quality = float(parameter[2:])
+                    except ValueError:
+                        quality = 0.0
+
+            ranges[mediaType] = quality
+
+        def qualityFor(candidates):
+            for candidate in candidates:
+                if candidate in ranges:
+                    return ranges[candidate]
+            return 0.0
+
+        # "*/*" counts towards HTML but not towards JSON, so a client expressing no
+        # preference keeps getting the page it used to get. curl sends "*/*" by
+        # default, and flipping that to JSON would change what every existing script
+        # and browser navigation receives. JSON has to be asked for by name.
+        jsonQuality = qualityFor(("application/json", "application/*"))
+        htmlQuality = qualityFor(("text/html", "text/*", "*/*"))
+
+        return jsonQuality > 0 and jsonQuality >= htmlQuality
+
+    def _wantsJSON(self):
+        """Whether this client asked for JSON rather than a rendered page.
+
+        Three ways to ask:
+          - an Accept header preferring application/json, the standard spelling
+          - a path containing _json, which the dashboard already used
+          - the legacy nopage parameter, which predates content negotiation and
+            used to mean "run the command but skip the HTML"
+        """
+        if self._acceptsJSONHeader():
+            return True
+
+        # BaseHTTPRequestHandler calls send_error for a malformed request line before
+        # it ever assigns self.path, so this cannot assume the attribute exists.
+        requestPath = getattr(self, "path", "")
+
+        if "_json" in requestPath:
+            return True
+
+        # Match nopage as a parameter key, not as a substring. processCommands
+        # lowercases parameters, so "NOPAGE" means the same thing to it, and a light
+        # named "nopage-rig" in some other parameter's value does not.
+        queryKeys = [parameter.split("=")[0].strip().lower()
+                     for parameter in requestPath.partition("?")[2].split("&")]
+
+        return "nopage" in queryKeys
+
+    def _sendJSON(self, payload, status=200):
+        """Write a JSON response body with the right headers."""
+        responseBody = json.dumps(payload).encode("utf-8")
+
+        self.send_response(status)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(responseBody)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(responseBody)
+
+    def _sendDoActionJSON(self, paramsList):
+        """The JSON form of a doAction response.
+
+        Mirrors what the HTML page reports, in the shape the POST endpoints already
+        use, so a client sees one response contract across the whole API rather than
+        one per method.
+        """
+        if len(paramsList) == 0:
+            self.send_error(400, "No valid parameters were provided. Separate multiple parameters with an & character.")
+            return
+
+        requestedMode = paramsList[3] if len(paramsList) > 3 else None
+        result = {"mode": requestedMode, "request": self.path}
+
+        if len(paramsList) > 2 and paramsList[2] is not None:
+            result["target"] = paramsList[2]
+
+        # Echo back what each mode's parameters were understood to be, so a caller can
+        # tell the difference between "ignored" and "clamped to something else".
+        if requestedMode == "CCT" and len(paramsList) > 5:
+            result["params"] = {"temp": paramsList[4], "bri": paramsList[5]}
+        elif requestedMode == "HSI" and len(paramsList) > 6:
+            result["params"] = {"hue": paramsList[4], "sat": paramsList[5], "bri": paramsList[6]}
+        elif requestedMode in ("ANM", "SCENE") and len(paramsList) > 5:
+            result["params"] = {"scene": paramsList[4], "bri": paramsList[5]}
+        elif requestedMode == "list":
+            result["lights"] = [{"id": index + 1,
+                                 "name": light[2] if light[2] else light[0].name,
+                                 "mac": light[0].address,
+                                 "linked": bool(light[1] != "" and hasattr(light[1], "is_connected") and light[1].is_connected)}
+                                for index, light in enumerate(availableLights)]
+        elif requestedMode == "list_animations":
+            result["animations"] = [{"name": animName,
+                                     "description": animData.get("description", ""),
+                                     "frames": len(animData.get("keyframes", [])),
+                                     "loop": animData.get("loop", False)}
+                                    for animName, animData in sorted(savedAnimations.items())]
+            # Only reported for the listing, which reads current state. On animate and
+            # stop_animate it would be a guess: startAnimation returns as soon as the
+            # engine thread is started, and animationRunning is not assigned until that
+            # thread runs, so the value read here would depend on scheduling.
+            result["animationPlaying"] = animationRunning
+            result["currentAnimation"] = currentAnimationName if animationRunning else None
+
+        result["success"] = True
+
+        # list and list_animations are answered entirely from state already in memory,
+        # so they must not go near the worker: processHTMLCommands waits up to five
+        # seconds for it before reaching its own no-op branch for these.
+        if requestedMode not in ("list", "list_animations"):
+            # Same fire-and-forget dispatch the HTML path uses. "success" here means the
+            # request was understood and queued, not that the lights have acted on it,
+            # and not that the command will turn out to be executable. Reporting the
+            # real outcome needs the request path restructured so the dispatch can be
+            # awaited, which belongs with the module split rather than here.
+            htmlProcessThread = threading.Thread(target=processHTMLCommands, args=(paramsList, asyncioEventLoop), name="htmlProcessThread")
+            htmlProcessThread.start()
+
+        self._sendJSON(result)
+
+    def send_error(self, code, message=None, explain=None):
+        """Error responses follow the same content negotiation as successful ones.
+
+        The base class always renders an HTML page, so a JSON client asking for a
+        light that does not exist, or tripping the address check, used to get markup
+        and a parse failure instead of something it could read.
+        """
+        if self._wantsJSON():
+            try:
+                self._sendJSON({"success": False, "code": code, "error": message or self.responses.get(code, ("Error",))[0]}, status=code)
+                return
+            except Exception:
+                pass # fall through to the HTML error page rather than sending nothing
+
+        BaseHTTPRequestHandler.send_error(self, code, message, explain)
 
     def _checkClientIP(self):
         """Reject the request unless the client is in the allowed networks."""
@@ -6502,6 +6667,10 @@ class NLPythonServer(BaseHTTPRequestHandler):
         else:
             # CHECK THE LENGTH OF THE URL REQUEST AND SEE IF IT'S TOO LONG
             if len(self.path) > 1024: # INCREASED LENGTH TO SUPPORT BATCH COMMANDS
+                if self._wantsJSON():
+                    self.send_error(414, "The request URL is too long. The NeewerLux HTTP server accepts URL commands up to 1024 characters.")
+                    return
+
                 # THE LAST REQUEST WAS WAY TOO LONG, SO QUICKLY RENDER AN ERROR PAGE AND RETURN FROM THE HTTP RENDERER
                 writeHTMLSections(self, "httpheaders")
                 writeHTMLSections(self, "htmlheaders")
@@ -6543,15 +6712,18 @@ class NLPythonServer(BaseHTTPRequestHandler):
             else: # if the URL contains "/NeewerLux/doAction?" then it's a valid URL
                 # Check for JSON API endpoints first
                 queryPart = self.path.replace(acceptableURL, "")
+                wantsJSON = self._wantsJSON()
+                isListRequest = (queryPart == "list" or queryPart.startswith("list&"))
 
-                # Redirect old ?list to new dashboard
-                if queryPart == "list" or queryPart.startswith("list&"):
+                # Send a browser hitting the old ?list URL to the dashboard, but answer
+                # a client that asked for JSON with the listing it wanted.
+                if isListRequest and not wantsJSON:
                     self.send_response(302)
                     self.send_header('Location', '/NeewerLux/')
                     self.end_headers()
                     return
 
-                if queryPart.startswith("list_json"):
+                if queryPart.startswith("list_json") or (isListRequest and wantsJSON):
                     # Return structured JSON for the web dashboard
                     self.send_response(200)
                     self._send_cors_headers()
@@ -6589,7 +6761,6 @@ class NLPythonServer(BaseHTTPRequestHandler):
                                          "loop": aData.get("loop", False),
                                          "modes": sorted(modes)})
 
-                    import json as _json
                     # Build preset data for web dashboard
                     presetsData = []
                     for i in range(numOfPresets):
@@ -6602,14 +6773,29 @@ class NLPythonServer(BaseHTTPRequestHandler):
                               "animationPlaying": animationRunning,
                               "currentAnimation": currentAnimationName if animationRunning else "",
                               "presets": presetsData, "numPresets": numOfPresets}
-                    self.wfile.write(_json.dumps(result).encode("utf-8"))
+                    self.wfile.write(json.dumps(result).encode("utf-8"))
                     return
-
-                writeHTMLSections(self, "httpheaders")
 
                 # BREAK THE URL INTO USABLE PARAMTERS
                 paramsList = self.path.replace(acceptableURL, "").split("&") # split the included params into a list
-                paramsList = processCommands(paramsList) # process the commands returned from the HTTP parameters
+
+                try:
+                    paramsList = processCommands(paramsList) # process the commands returned from the HTTP parameters
+                except SystemExit:
+                    # argparse calls sys.exit() on a malformed argument such as "?mode"
+                    # with no value. Left alone that kills the request thread and drops
+                    # the connection without any response at all.
+                    self.send_error(400, "One of the parameters in the request was malformed. Check that every parameter that takes a value has one.")
+                    return
+                except (ValueError, TypeError) as e:
+                    self.send_error(400, "A parameter in the request had a value that could not be read: " + str(e))
+                    return
+
+                if wantsJSON:
+                    self._sendDoActionJSON(paramsList)
+                    return
+
+                writeHTMLSections(self, "httpheaders")
 
                 if len(paramsList) == 0: # we have no valid parameters, so show the error page
                     writeHTMLSections(self, "htmlheaders")
